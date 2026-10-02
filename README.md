@@ -63,13 +63,18 @@ Enter `diskmanager` in the shell. Use `help` in DiskManager for the full command
 ```text
 DiskManager> list
 DiskManager> info 0
+DiskManager> format
 DiskManager> format 0 0
 DiskManager> assign 0 0 AA
+DiskManager> reset 0
+DiskManager> wipe 1
 DiskManager> rescan
 DiskManager> home
 ```
 
-`format` asks for confirmation and formats a partition as FAT. On fixed disks, it also attempts to ensure a 100 MiB metadata partition is first. It uses existing leading free space, moves the first partition only when the destination is available, or rebuilds a single selected partition as part of the confirmed destructive format. If other partitions prevent a safe layout, it stops without changing the layout. Disks under 1 GiB are treated as removable and do not receive a metadata partition.
+Bare `format` opens an operation chooser for formatting a volume, initializing a blank disk, resetting a disk layout, or erasing a disk. `format <drive:> [filesystem]` and `format <disk#> <part#> [filesystem]` format only the selected partition; they do not move or recreate partition entries. The filesystem list currently contains FAT only. Recognized EFI, boot, recovery, reserved, and Yggdrasil metadata partitions require a typed confirmation naming the disk and partition, but can still be formatted.
+
+`init <disk#>` initializes a blank disk. `reset <disk#>` replaces the existing partition layout with the default Yggdrasil layout without overwriting all data sectors. `wipe <disk#>` overwrites every addressable sector and leaves the disk blank; this software operation is not a hardware secure erase. Reset and wipe require typing the operation, disk index, and disk name to confirm. Disks under 1 GiB are treated as removable and do not receive a metadata partition.
 
 Persistent drive assignments use the v3 raw metadata partition when available and `.metaDisk` files on eligible data volumes. FAT volumes larger than 500 MiB receive the file; smaller volumes on disks treated as removable also receive it. The raw registry format is v3-only; recreate older raw metadata partitions with DiskManager if upgrading from a development build that used an earlier format. Sizes are displayed in binary units such as `MiB` and `GiB`.
 

@@ -112,7 +112,7 @@ public static class YVolumeManager {
             Partition partition = volumes[index];
             string mountPath = $"/Device/HarddiskVolume{volumeNumber++}";
             mountPaths.Add(mountPath);
-            if (!VfsManager.TryMount("fat", partition, MountFlags.None, mountPath, out VfsManager.VfsMount? mount)) {
+            if (!VfsManager.TryMount(DiskFormatter.FatFilesystemName, partition, MountFlags.None, mountPath, out VfsManager.VfsMount? mount)) {
                 ShellOutput.WriteLine($"Mount failed for {partition.Name} at {mountPath}; it was not formatted.");
                 continue;
             }
@@ -182,7 +182,7 @@ public static class YVolumeManager {
             return true;
         }
 
-        if (!VfsManager.TryMount("fat", partition, MountFlags.None, mountPath, out _)) {
+        if (!VfsManager.TryMount(DiskFormatter.FatFilesystemName, partition, MountFlags.None, mountPath, out _)) {
             return false;
         }
         AssignDriveLetter(driveName, mountPath);
@@ -224,6 +224,9 @@ public static class YVolumeManager {
         if (!string.Equals(CurrentDrive, normalizedDriveName, StringComparison.OrdinalIgnoreCase)
             && oldDriveNames.Exists(oldDriveName => string.Equals(oldDriveName, CurrentDrive, StringComparison.OrdinalIgnoreCase))) {
             CurrentDrive = normalizedDriveName;
+        }
+        if (CurrentDrive.Length == 0) {
+            SetCurrentDrive(normalizedDriveName);
         }
         PersistDriveAssignment(normalizedDriveName, root);
     }
@@ -284,7 +287,119 @@ public static class YVolumeManager {
         if (IsMetadataPartition(partition)
             && (_metadataPartition is null || ReferenceEquals(_metadataPartition, partition))) {
             _metadataPartition = partition;
+            PersistCurrentDriveAssignments();
         }
+    }
+
+    public static void RefreshMetadataAfterFormat(Partition formattedPartition) {
+        if (_metadataPartition is null || !IsSamePartition(_metadataPartition, formattedPartition)) {
+            return;
+        }
+
+        Partition? replacement = FindMetadataPartition();
+        _metadataPartition = replacement is not null && IsSamePartition(replacement, formattedPartition)
+            ? null
+            : replacement;
+    }
+
+    public static bool PrepareDiskForDestructiveOperation(IBlockDevice device) {
+        IReadOnlyList<VfsManager.VfsMount> mounts = VfsManager.Mounts;
+        List<VfsManager.VfsMount> targetMounts = new();
+        List<string> allMountPaths = new();
+        List<Partition> allPartitions = new();
+        List<bool> allMounted = new();
+        for (int index = 0; index < mounts.Count; index++) {
+            VfsManager.VfsMount mount = mounts[index];
+            if (mount.Partition is null) {
+                continue;
+            }
+
+            allMountPaths.Add(mount.MountPoint);
+            allPartitions.Add(mount.Partition);
+            allMounted.Add(true);
+            if (ReferenceEquals(mount.Partition.Host, device)) {
+                targetMounts.Add(mount);
+            }
+        }
+
+        List<DriveRecord> records = new();
+        if (_metadataPartition is not null) {
+            records = ReadRegistry(_metadataPartition, out _, out int activeSlot);
+            if (activeSlot < 0) {
+                records = ReadRegistryFiles(allMountPaths, allMounted.ToArray(), allPartitions);
+            }
+        } else {
+            records = ReadRegistryFiles(allMountPaths, allMounted.ToArray(), allPartitions);
+        }
+
+        string previousDirectory = Directory.GetCurrentDirectory();
+        bool previousDirectoryWasTarget = false;
+        List<string> targetDriveNames = new(targetMounts.Count);
+        for (int index = 0; index < targetMounts.Count; index++) {
+            targetDriveNames.Add(GetDriveLetterForMount(targetMounts[index].MountPoint));
+            if (IsPathWithinMount(Directory.GetCurrentDirectory(), targetMounts[index].MountPoint)) {
+                previousDirectoryWasTarget = true;
+                Directory.SetCurrentDirectory("/");
+            }
+        }
+
+        List<string> unmountedPaths = new();
+        List<int> unmountedIndexes = new();
+        bool unmountedAll = true;
+        for (int index = 0; index < targetMounts.Count; index++) {
+            string mountPoint = targetMounts[index].MountPoint;
+            if (VfsManager.TryUnmount(mountPoint)) {
+                unmountedPaths.Add(mountPoint);
+                unmountedIndexes.Add(index);
+            } else {
+                unmountedAll = false;
+                ShellOutput.WriteLine($"Could not unmount {mountPoint}; disk operation stopped.");
+            }
+        }
+        for (int index = 0; index < unmountedPaths.Count; index++) {
+            RemoveDriveLinksForMount(unmountedPaths[index]);
+        }
+        if (!unmountedAll) {
+            for (int index = 0; index < unmountedIndexes.Count; index++) {
+                int mountIndex = unmountedIndexes[index];
+                VfsManager.VfsMount mount = targetMounts[mountIndex];
+                string driveName = targetDriveNames[mountIndex];
+                bool restored = driveName.Length == 0
+                    ? VfsManager.TryMount(DiskFormatter.FatFilesystemName, mount.Partition!, MountFlags.None, mount.MountPoint, out _)
+                    : MountVolume(mount.Partition!, mount.MountPoint, driveName);
+                if (!restored) {
+                    ShellOutput.WriteLine($"Could not restore the mount at {mount.MountPoint} after cancellation.");
+                }
+            }
+            if (previousDirectoryWasTarget) {
+                for (int index = 0; index < targetMounts.Count; index++) {
+                    VfsManager.VfsMount mount = targetMounts[index];
+                    if (!IsPathWithinMount(previousDirectory, mount.MountPoint)
+                        || !VfsManager.TryGetMount(mount.MountPoint, out _)) {
+                        continue;
+                    }
+                    if (targetDriveNames[index].Length != 0) {
+                        SetCurrentDrive(targetDriveNames[index]);
+                    }
+                    Directory.SetCurrentDirectory(previousDirectory);
+                    UpdateCurrentDirectory(previousDirectory);
+                    break;
+                }
+            }
+            return false;
+        }
+
+        ulong deviceKey = GetDeviceKey(device);
+        for (int index = records.Count - 1; index >= 0; index--) {
+            if (records[index].DeviceKey == deviceKey) {
+                records.RemoveAt(index);
+            }
+        }
+        if (_metadataPartition is not null && ReferenceEquals(_metadataPartition.Host, device)) {
+            _metadataPartition = null;
+        }
+        PersistDriveRecords(records);
+        return true;
     }
 
     public static bool SetCurrentDrive(char driveLetter) {
@@ -478,6 +593,123 @@ public static class YVolumeManager {
             }
         }
         return null;
+    }
+
+    private static bool IsSamePartition(Partition left, Partition right) {
+        return ReferenceEquals(left.Host, right.Host) && left.StartSector == right.StartSector
+            && left.BlockCount == right.BlockCount;
+    }
+
+    private static bool IsPathWithinMount(string path, string mountPoint) {
+        string root = mountPoint.TrimEnd('/');
+        return path.Equals(root, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void RemoveDriveLinksForMount(string mountPoint) {
+        string root = mountPoint.TrimEnd('/');
+        List<string> removedDrives = new();
+        foreach (KeyValuePair<string, string> drive in _driveLinks) {
+            if (string.Equals(drive.Value, root, StringComparison.OrdinalIgnoreCase)) {
+                removedDrives.Add(drive.Key);
+            }
+        }
+        for (int index = 0; index < removedDrives.Count; index++) {
+            _driveLinks.Remove(removedDrives[index]);
+            _currentDirectories.Remove(removedDrives[index]);
+        }
+
+        List<string> staleDirectories = new();
+        foreach (KeyValuePair<string, string> directory in _currentDirectories) {
+            if (IsPathWithinMount(directory.Value, root)) {
+                staleDirectories.Add(directory.Key);
+            }
+        }
+        for (int index = 0; index < staleDirectories.Count; index++) {
+            _currentDirectories.Remove(staleDirectories[index]);
+        }
+
+        if (removedDrives.Exists(drive => string.Equals(drive, CurrentDrive, StringComparison.OrdinalIgnoreCase))) {
+            foreach (KeyValuePair<string, string> drive in _driveLinks) {
+                if (SetCurrentDrive(drive.Key)) {
+                    return;
+                }
+            }
+            CurrentDrive = string.Empty;
+        }
+    }
+
+    private static void PersistDriveRecords(List<DriveRecord> records) {
+        if (_metadataPartition is not null) {
+            SaveRegistry(_metadataPartition, records);
+        }
+
+        IReadOnlyList<VfsManager.VfsMount> mounts = VfsManager.Mounts;
+        List<string> mountPaths = new(mounts.Count);
+        List<Partition> partitions = new(mounts.Count);
+        bool[] mounted = new bool[mounts.Count];
+        for (int index = 0; index < mounts.Count; index++) {
+            VfsManager.VfsMount mount = mounts[index];
+            if (mount.Partition is null) {
+                continue;
+            }
+            mountPaths.Add(mount.MountPoint);
+            partitions.Add(mount.Partition);
+        }
+        Array.Resize(ref mounted, mountPaths.Count);
+        for (int index = 0; index < mounted.Length; index++) {
+            mounted[index] = true;
+        }
+        SaveRegistryFiles(mountPaths, mounted, partitions, records);
+    }
+
+    private static void PersistCurrentDriveAssignments() {
+        IReadOnlyList<VfsManager.VfsMount> mounts = VfsManager.Mounts;
+        List<string> mountPaths = new(mounts.Count);
+        List<Partition> partitions = new(mounts.Count);
+        for (int index = 0; index < mounts.Count; index++) {
+            VfsManager.VfsMount mount = mounts[index];
+            if (mount.Partition is null) {
+                continue;
+            }
+
+            mountPaths.Add(mount.MountPoint);
+            partitions.Add(mount.Partition);
+        }
+
+        bool[] mounted = new bool[mountPaths.Count];
+        for (int index = 0; index < mounted.Length; index++) {
+            mounted[index] = true;
+        }
+        List<DriveRecord> records = ReadRegistryFiles(mountPaths, mounted, partitions);
+        for (int index = 0; index < partitions.Count; index++) {
+            Partition partition = partitions[index];
+            string driveName = GetDriveLetterForMount(mountPaths[index]);
+            if (driveName.Length == 0) {
+                continue;
+            }
+
+            DriveRecord assignment = new(GetDeviceKey(partition.Host), partition.StartSector, partition.BlockCount, driveName);
+            for (int recordIndex = records.Count - 1; recordIndex >= 0; recordIndex--) {
+                DriveRecord record = records[recordIndex];
+                bool sameVolume = record.DeviceKey == assignment.DeviceKey
+                    && record.StartSector == assignment.StartSector && record.SectorCount == assignment.SectorCount;
+                if (string.Equals(record.Letter, driveName, StringComparison.OrdinalIgnoreCase) && !sameVolume) {
+                    records.RemoveAt(recordIndex);
+                }
+            }
+
+            int existingIndex = FindRecord(records, assignment.DeviceKey, partition);
+            if (existingIndex >= 0) {
+                records[existingIndex] = assignment;
+            } else if (records.Count < MaximumRegistryRecords) {
+                records.Add(assignment);
+            }
+        }
+        if (_metadataPartition is not null) {
+            SaveRegistry(_metadataPartition, records);
+        }
+        SaveRegistryFiles(mountPaths, mounted, partitions, records);
     }
 
     public static bool IsMetadataPartition(Partition partition) {

@@ -20,7 +20,7 @@ public static class ShellLineEditor {
     };
     private static readonly string[] DiskManagerCommands = {
         "help", "home", "exit", "back", "quit", "clear", "cls", "list", "disks", "partitions",
-        "parts", "volumes", "drives", "space", "assign", "format", "init", "rescan", "info",
+        "parts", "volumes", "drives", "space", "assign", "format", "init", "reset", "wipe", "erase", "rescan", "info",
     };
 
     public static string ReadLine(string prompt, bool diskManagerMode = false) {

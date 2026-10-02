@@ -35,6 +35,15 @@
         </ItemGroup>
     </Target>
 
+    <Target Name="GenerateStartMenuLogo" BeforeTargets="CoreCompile">
+        <Error Condition="'$(OS)' != 'Windows_NT'" Text="The Start menu logo asset must be generated on Windows." />
+        <Error Condition="!Exists('$(WINDIR)\System32\@WLOGO_96x96.png')" Text="Could not find $(WINDIR)\System32\@WLOGO_96x96.png. Restore this image from your Windows installation and rebuild." />
+        <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)tools\ExtractStartMenuLogo.ps1&quot; -InputPath &quot;$(WINDIR)\System32\@WLOGO_96x96.png&quot; -OutputPath &quot;$(IntermediateOutputPath)StartMenuLogoAsset.g.cs&quot;" />
+        <ItemGroup>
+            <Compile Include="$(IntermediateOutputPath)StartMenuLogoAsset.g.cs" />
+        </ItemGroup>
+    </Target>
+
 
     <!-- Redirects build output and intermediate files to the 'Build' directory -->
     <PropertyGroup>

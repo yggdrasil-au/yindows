@@ -35,7 +35,7 @@ public class Kernel : CKSys.Kernel {
         base.OnBoot();
 
         FatFilesystemType fat = new();
-        if (!VfsManager.RegisterFilesystem("fat", fat)) {
+        if (!VfsManager.RegisterFilesystem(DiskFormatter.FatFilesystemName, fat)) {
             ShellOutput.WriteLine("The name \"fat\" is already registered.");
             return;
         }

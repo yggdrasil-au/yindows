@@ -7,12 +7,28 @@ using yggdrasilKernel.Vfs;
 namespace yggdrasilKernel.Storage;
 
 public static class DiskFormatter {
+    public const string FatFilesystemName = "fat";
     public const ulong MetadataPartitionSectors = 204800;
     private const ulong FirstPartitionSector = 2048;
     private const ulong AlignmentSectors = 2048;
+    private const ulong ResetPrimaryTableSectors = 34;
+    private const ulong GptBackupTableSectors = 33;
+    private const int WipeBufferBytes = 65536;
     private const byte Fat32MbrType = 0x0C;
     private const byte MetadataMbrType = 0xDA;
     private static readonly Guid MetadataGptType = new("7E6D4A31-6E59-4D53-9A61-594D45544131");
+    private static readonly string[] _supportedFilesystems = { FatFilesystemName };
+
+    public static IReadOnlyList<string> SupportedFilesystems => _supportedFilesystems;
+
+    public static bool IsSupportedFilesystem(string filesystem) {
+        for (int index = 0; index < _supportedFilesystems.Length; index++) {
+            if (string.Equals(_supportedFilesystems[index], filesystem, StringComparison.OrdinalIgnoreCase)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     public static bool TryInitializeDisk(IBlockDevice disk, bool reserveMetadata, out Partition? metadataPartition, out Partition? dataPartition) {
         metadataPartition = null;
@@ -213,12 +229,57 @@ public static class DiskFormatter {
         return true;
     }
 
-    public static bool TryFormatNewVolume(Partition partition) {
-        if (partition.BlockSize != 512) {
+    public static bool TryResetDisk(
+        IBlockDevice disk,
+        bool reserveMetadata,
+        out Partition? metadataPartition,
+        out Partition? dataPartition
+    ) {
+        metadataPartition = null;
+        dataPartition = null;
+        if (disk.BlockSize != 512 || disk.BlockCount <= ResetPrimaryTableSectors + GptBackupTableSectors) {
             return false;
         }
 
-        return Cosmos.Kernel.System.Vfs.VfsManager.TryFormat("fat", partition, null);
+        bool useGpt = Gpt.IsGpt(disk) || HasGptBackupHeader(disk);
+        if (useGpt) {
+            byte[] zeroedBackup = new byte[(int)(GptBackupTableSectors * disk.BlockSize)];
+            disk.WriteBlock(disk.BlockCount - GptBackupTableSectors, GptBackupTableSectors, zeroedBackup);
+            Gpt.Create(disk);
+        } else {
+            Mbr.Create(disk);
+        }
+        disk.Flush();
+        StorageManager.RescanPartitions(disk);
+        return TryInitializeDisk(disk, reserveMetadata, out metadataPartition, out dataPartition);
+    }
+
+    public static bool TryWipeDisk(IBlockDevice disk) {
+        if (disk.BlockSize == 0 || disk.BlockSize > WipeBufferBytes) {
+            return false;
+        }
+
+        ulong blocksPerChunk = (ulong)WipeBufferBytes / disk.BlockSize;
+        byte[] zeros = new byte[(int)(blocksPerChunk * disk.BlockSize)];
+        ulong block = 0;
+        while (block < disk.BlockCount) {
+            ulong blocksToWrite = Math.Min(blocksPerChunk, disk.BlockCount - block);
+            int bytesToWrite = (int)(blocksToWrite * disk.BlockSize);
+            disk.WriteBlock(block, blocksToWrite, zeros.AsSpan(0, bytesToWrite));
+            block += blocksToWrite;
+        }
+
+        disk.Flush();
+        StorageManager.RescanPartitions(disk);
+        return StorageManager.GetPartitions(disk).Count == 0;
+    }
+
+    public static bool TryFormatNewVolume(Partition partition, string filesystem = FatFilesystemName) {
+        if (partition.BlockSize != 512 || !IsSupportedFilesystem(filesystem)) {
+            return false;
+        }
+
+        return Cosmos.Kernel.System.Vfs.VfsManager.TryFormat(filesystem, partition, null);
     }
 
     private static Partition? FindPartition(IBlockDevice disk, ulong startSector, ulong sectorCount) {
@@ -265,6 +326,18 @@ public static class DiskFormatter {
             }
         }
         return true;
+    }
+
+    private static bool HasGptBackupHeader(IBlockDevice disk) {
+        if (disk.BlockSize != 512 || disk.BlockCount == 0) {
+            return false;
+        }
+
+        byte[] sector = new byte[512];
+        disk.ReadBlock(disk.BlockCount - 1, 1, sector);
+        return sector[0] == (byte)'E' && sector[1] == (byte)'F' && sector[2] == (byte)'I'
+            && sector[3] == (byte)' ' && sector[4] == (byte)'P' && sector[5] == (byte)'A'
+            && sector[6] == (byte)'R' && sector[7] == (byte)'T';
     }
 
     private static ulong AlignUp(ulong value, ulong alignment) {

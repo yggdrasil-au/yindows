@@ -3,6 +3,8 @@ using Cosmos.Kernel.System.Graphics;
 using Cosmos.Kernel.System.Graphics.Fonts;
 using Cosmos.Kernel.System.Mouse;
 
+using yggdrasilKernel.HAL;
+
 namespace yggdrasilKernel.PreOs.Desktop;
 
 public static class WindowManager {
@@ -102,7 +104,7 @@ public static class WindowManager {
         int startButtonWidth = 48;
         canvas.DrawFilledRectangle(StartButtonColor, 0, taskbarY, startButtonWidth, taskbarHeight);
 
-        canvas.DrawString("[]", PCScreenFont.DefaultFont, Color.White, 16, taskbarY + 12);
+        DrawStartButtonLogo(canvas, startButtonWidth, taskbarY, taskbarHeight);
 
         if (MouseHandler.IsStartMenuOpen) {
             int menuHeight = 300;
@@ -121,19 +123,34 @@ public static class WindowManager {
         canvas.DrawString(timeStr, PCScreenFont.DefaultFont, Color.White, screenWidth - timeWidth - rightMargin, taskbarY + 12);
     }
 
-    private static string GetCurrentTime() {
-        // use hardware clock from HAL
-        return HardwareClock.GetFormattedTime();
-        // The following code is now obsolete because we are using the hardware clock
-        // the value this returned was incorrect by a few hours
-        /*
-        System.DateTime now = System.DateTime.Now;
-        if (now.Minute != _lastMinute) {
-            _lastMinute = now.Minute;
-            _cachedTime = now.ToString("HH:mm");
-        }
+    private static void DrawStartButtonLogo(Canvas canvas, int buttonWidth, int buttonY, int buttonHeight) {
+        int logoX = (buttonWidth - StartMenuLogoAsset.Width) / 2;
+        int logoY = buttonY + (buttonHeight - StartMenuLogoAsset.Height) / 2;
 
-        return _cachedTime;
-        */
+        for (int row = 0; row < StartMenuLogoAsset.Height; row++) {
+            for (int column = 0; column < StartMenuLogoAsset.Width; column++) {
+                int argb = StartMenuLogoAsset.Pixels[row * StartMenuLogoAsset.Width + column];
+                int alpha = (int)((uint)argb >> 24);
+                if (alpha == 0) {
+                    continue;
+                }
+
+                int red = (argb >> 16) & 0xFF;
+                int green = (argb >> 8) & 0xFF;
+                int blue = argb & 0xFF;
+                if (alpha < 255) {
+                    int inverseAlpha = 255 - alpha;
+                    red = (red * alpha + StartButtonColor.R * inverseAlpha + 127) / 255;
+                    green = (green * alpha + StartButtonColor.G * inverseAlpha + 127) / 255;
+                    blue = (blue * alpha + StartButtonColor.B * inverseAlpha + 127) / 255;
+                }
+
+                canvas.DrawPoint(Color.FromArgb(255, red, green, blue), logoX + column, logoY + row);
+            }
+        }
+    }
+
+    private static string GetCurrentTime() {
+        return HAL.HardwareClock.GetFormattedTime();
     }
 }

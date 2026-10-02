@@ -12,6 +12,14 @@ using yggdrasilKernel;
 namespace yggdrasilKernel.PreOs.Shell;
 
 public static class DiskManagerCli {
+    private static readonly Guid EfiSystemPartitionType = new("C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
+    private static readonly Guid BiosBootPartitionType = new("21686148-6449-6E6F-744E-656564454649");
+    private static readonly Guid MicrosoftReservedPartitionType = new("E3C9E316-0B5C-4DB8-817D-F92DF00215AE");
+    private static readonly Guid WindowsRecoveryPartitionType = new("DE94BBA4-06D1-4D40-A16A-BFD50179D6AC");
+    private static readonly Guid LinuxFilesystemPartitionType = new("0FC63DAF-8483-4772-8E79-3D69D8477DE4");
+    private static readonly Guid LinuxSwapPartitionType = new("0657FD6D-A4AB-43C4-84E5-0933C84B4F4F");
+    private static readonly Guid MetadataGptPartitionType = new("7E6D4A31-6E59-4D53-9A61-594D45544131");
+
     public static void PrintBanner() {
         ShellOutput.WriteLine("==================================================");
         ShellOutput.WriteLine("             YggdrasilOS Disk Manager             ");
@@ -92,12 +100,14 @@ public static class DiskManagerCli {
                 }
                 break;
             case "format":
-                if (parts.Length == 2) {
-                    HandleFormatDriveLetter(parts[1]);
-                } else if (parts.Length >= 3) {
-                    HandleFormatPartition(parts[1], parts[2]);
+                if (parts.Length == 1) {
+                    RunFormatChooser();
+                } else if (parts.Length >= 3 && int.TryParse(parts[1], out _)) {
+                    HandleFormatPartition(parts[1], parts[2], parts.Length >= 4 ? parts[3] : null);
+                } else if (parts.Length >= 2) {
+                    HandleFormatDriveLetter(parts[1], parts.Length >= 3 ? parts[2] : null);
                 } else {
-                    ShellOutput.WriteLine("Usage: format <drive:> OR format <disk#> <part#>");
+                    ShellOutput.WriteLine("Usage: format [drive: [filesystem] | disk# part# [filesystem]]");
                 }
                 break;
             case "init":
@@ -106,6 +116,21 @@ public static class DiskManagerCli {
                 } else {
                     bool reserveMetadata = parts.Length < 3 || !parts[2].Equals("nometa", StringComparison.OrdinalIgnoreCase);
                     HandleInitDisk(parts[1], reserveMetadata);
+                }
+                break;
+            case "reset":
+                if (parts.Length < 2) {
+                    ShellOutput.WriteLine("Usage: reset <disk#>");
+                } else {
+                    HandleResetDisk(parts[1]);
+                }
+                break;
+            case "wipe":
+            case "erase":
+                if (parts.Length < 2) {
+                    ShellOutput.WriteLine("Usage: wipe <disk#>");
+                } else {
+                    HandleWipeDisk(parts[1]);
                 }
                 break;
             case "rescan":
@@ -203,9 +228,12 @@ public static class DiskManagerCli {
         ShellOutput.WriteLine("  list [disks|partitions|volumes]  Show storage inventory");
         ShellOutput.WriteLine("  info <disk#>                     Show disk and partition details");
         ShellOutput.WriteLine("  space [drive:]                   Scan and report free space in background");
-        ShellOutput.WriteLine("  format <drive:>                  Format a mounted drive as FAT");
-        ShellOutput.WriteLine("  format <disk#> <part#>           Format a partition and mount it");
+        ShellOutput.WriteLine("  format                            Choose a disk operation");
+        ShellOutput.WriteLine("  format <drive:> [filesystem]      Format a mounted volume");
+        ShellOutput.WriteLine("  format <disk#> <part#> [fs]       Format a partition");
         ShellOutput.WriteLine("  init <disk#> [nometa]            Initialize a blank disk");
+        ShellOutput.WriteLine("  reset <disk#>                     Rebuild the disk layout");
+        ShellOutput.WriteLine("  wipe / erase <disk#>              Erase every addressable sector");
         ShellOutput.WriteLine($"  assign <disk#> <part#> <name>    Mount or reassign a drive name (max {YVolumeManager.MaxDriveNameLength} letters)");
         ShellOutput.WriteLine("  rescan                           Rescan partition tables");
         ShellOutput.WriteLine("  clear                            Clear the screen");
@@ -246,7 +274,7 @@ public static class DiskManagerCli {
         ShellOutput.WriteLine();
     }
 
-    private static void HandleFormatDriveLetter(string driveArgument) {
+    private static void HandleFormatDriveLetter(string driveArgument, string? filesystemArgument) {
         if (!TryParseDriveName(driveArgument, out string driveName)
               || !YVolumeManager.TryGetVolumePath(driveName, out string mountPoint)) {
             ShellOutput.WriteLine($"Drive '{driveArgument}' is not mounted.");
@@ -258,61 +286,60 @@ public static class DiskManagerCli {
             ShellOutput.WriteLine($"Could not locate the partition behind {driveName}:\\.");
             return;
         }
-        if (!Confirm($"WARNING: Format {driveName}:\\ as FAT? All data will be erased (y/n): ")) {
-            ShellOutput.WriteLine("Format cancelled.");
+        if (!TryGetPartitionIndex(partition, out int diskIndex, out int partitionIndex)) {
+            ShellOutput.WriteLine("Could not locate the mounted partition in the current disk inventory.");
             return;
         }
-        FormatPartition(partition, driveName, mountPoint);
+        HandleFormatTarget(partition, diskIndex, partitionIndex, driveName, mountPoint, filesystemArgument);
     }
 
-    private static void HandleFormatPartition(string diskArgument, string partitionArgument) {
+    private static void HandleFormatPartition(string diskArgument, string partitionArgument, string? filesystemArgument) {
         if (!TryGetPartition(diskArgument, partitionArgument, out Partition? partition, out int diskIndex, out int partitionIndex)
             || partition is null) {
-            return;
-        }
-        if (YVolumeManager.IsMetadataPartition(partition)) {
-            ShellOutput.WriteLine("The system metadata partition cannot be formatted here.");
             return;
         }
 
         string? mountPoint = YVolumeManager.GetMountPointForPartition(partition);
         string driveName = mountPoint is null ? string.Empty : YVolumeManager.GetDriveLetterForMount(mountPoint);
-        if (!Confirm($"WARNING: Format Disk {diskIndex}, Partition {partitionIndex} ({partition.Name}) as FAT? All data will be erased (y/n): ")) {
+        HandleFormatTarget(partition, diskIndex, partitionIndex, driveName, mountPoint, filesystemArgument);
+    }
+
+    private static void HandleFormatTarget(
+        Partition partition,
+        int diskIndex,
+        int partitionIndex,
+        string driveName,
+        string? mountPoint,
+        string? filesystemArgument
+    ) {
+        if (!TrySelectFilesystem(filesystemArgument, out string filesystem)) {
+            return;
+        }
+
+        if (IsProtectedPartition(partition, out string protectionReason)) {
+            string confirmation = $"FORMAT {diskIndex} {partitionIndex} {partition.Host.Name}";
+            ShellOutput.WriteLine($"WARNING: {protectionReason} may be required by an operating system.");
+            if (!ConfirmTyped($"Type '{confirmation}' to format {partition.Name} (all data will be erased): ", confirmation)) {
+                ShellOutput.WriteLine("Format cancelled.");
+                return;
+            }
+        } else if (!Confirm($"WARNING: Format Disk {diskIndex}, Partition {partitionIndex} ({partition.Name}) as {filesystem}? All data will be erased (y/n): ")) {
             ShellOutput.WriteLine("Format cancelled.");
             return;
         }
-        FormatPartition(partition, driveName, mountPoint);
+        FormatPartition(partition, driveName, mountPoint, filesystem);
     }
 
-    private static void FormatPartition(Partition partition, string driveName, string? oldMountPoint) {
-        if (YVolumeManager.IsMetadataPartition(partition)) {
-            ShellOutput.WriteLine("The system metadata partition cannot be formatted here.");
-            return;
-        }
-
+    private static void FormatPartition(Partition partition, string driveName, string? oldMountPoint, string filesystem) {
         if (oldMountPoint is not null && !VfsManager.TryUnmount(oldMountPoint)) {
             ShellOutput.WriteLine($"Could not unmount {oldMountPoint}; formatting stopped.");
             return;
         }
 
-        if (!DiskFormatter.TryEnsureMetadataPartitionFirst(partition, out Partition dataPartition,
-            out Partition? metadataPartition, out string failureReason)) {
-            ShellOutput.WriteLine($"Could not prepare a metadata-first layout: {failureReason}");
-            if (oldMountPoint is not null && driveName.Length != 0
-                && !YVolumeManager.MountVolume(partition, oldMountPoint, driveName)) {
-                ShellOutput.WriteLine("The original volume could not be remounted after layout preparation failed.");
-            }
-            return;
-        }
-
-        if (metadataPartition is not null) {
-            YVolumeManager.RegisterMetadataPartition(metadataPartition);
-        }
-
-        partition = dataPartition;
-        bool formatted = DiskFormatter.TryFormatNewVolume(partition);
+        bool formatted = DiskFormatter.TryFormatNewVolume(partition, filesystem);
+        YVolumeManager.RefreshMetadataAfterFormat(partition);
         if (!formatted) {
-            ShellOutput.WriteLine("FAT formatting failed.");
+            ShellOutput.WriteLine($"Formatting as {filesystem} failed.");
         }
 
         string mountPoint = oldMountPoint ?? $"/Device/HarddiskVolume{YVolumeManager.GetNextMountNumber()}";
@@ -326,6 +353,226 @@ public static class DiskManagerCli {
         } else {
             ShellOutput.WriteLine("The volume could not be remounted after the failed format.");
         }
+    }
+
+    private static void RunFormatChooser() {
+        ShellOutput.WriteLine("Disk operations:");
+        ShellOutput.WriteLine("  1. Format a volume");
+        ShellOutput.WriteLine("  2. Initialize a blank disk");
+        ShellOutput.WriteLine("  3. Reset a disk layout");
+        ShellOutput.WriteLine("  4. Erase every sector");
+        string choice = ShellLineEditor.ReadLine("Choose operation [1-4]: ", diskManagerMode: true);
+        switch (choice.Trim()) {
+            case "1":
+                string target = ShellLineEditor.ReadLine("Volume target (drive: or disk# part#): ", diskManagerMode: true);
+                string[] targetParts = SplitArgs(target);
+                if (targetParts.Length == 1) {
+                    HandleFormatDriveLetter(targetParts[0], null);
+                } else if (targetParts.Length >= 2) {
+                    HandleFormatPartition(targetParts[0], targetParts[1], targetParts.Length >= 3 ? targetParts[2] : null);
+                } else {
+                    ShellOutput.WriteLine("No volume target was entered.");
+                }
+                break;
+            case "2":
+                string initializeDisk = ShellLineEditor.ReadLine("Disk index: ", diskManagerMode: true);
+                if (initializeDisk.Length > 0) {
+                    HandleInitDisk(initializeDisk, true);
+                }
+                break;
+            case "3":
+                string resetDisk = ShellLineEditor.ReadLine("Disk index: ", diskManagerMode: true);
+                if (resetDisk.Length > 0) {
+                    HandleResetDisk(resetDisk);
+                }
+                break;
+            case "4":
+                string wipeDisk = ShellLineEditor.ReadLine("Disk index: ", diskManagerMode: true);
+                if (wipeDisk.Length > 0) {
+                    HandleWipeDisk(wipeDisk);
+                }
+                break;
+            default:
+                ShellOutput.WriteLine("Operation cancelled.");
+                break;
+        }
+    }
+
+    private static bool TrySelectFilesystem(string? requestedFilesystem, out string filesystem) {
+        string available = string.Join(", ", DiskFormatter.SupportedFilesystems);
+        ShellOutput.WriteLine($"Available filesystems: {available}");
+        string selected = requestedFilesystem ?? ShellLineEditor.ReadLine(
+            $"Filesystem [{DiskFormatter.FatFilesystemName}]: ", diskManagerMode: true);
+        filesystem = string.IsNullOrWhiteSpace(selected) ? DiskFormatter.FatFilesystemName : selected.Trim();
+        if (!DiskFormatter.IsSupportedFilesystem(filesystem)) {
+            ShellOutput.WriteLine($"Unsupported filesystem '{filesystem}'. Available: {available}.");
+            return false;
+        }
+        return true;
+    }
+
+    private static bool IsProtectedPartition(Partition partition, out string reason) {
+        if (YVolumeManager.IsMetadataPartition(partition)) {
+            reason = "Yggdrasil metadata partition";
+            return true;
+        }
+
+        IBlockDevice disk = partition.Host;
+        if (Gpt.IsGpt(disk)) {
+            IReadOnlyList<GptPartitionEntry> entries = Gpt.Parse(disk);
+            for (int index = 0; index < entries.Count; index++) {
+                GptPartitionEntry entry = entries[index];
+                if (entry.StartSector != partition.StartSector || entry.SectorCount != partition.BlockCount) {
+                    continue;
+                }
+                if (entry.PartitionType == Gpt.BasicDataPartitionType || entry.PartitionType == LinuxFilesystemPartitionType) {
+                    reason = string.Empty;
+                    return false;
+                }
+
+                reason = GetGptProtectionReason(entry.PartitionType);
+                return true;
+            }
+        } else if (Mbr.IsMbr(disk)) {
+            IReadOnlyList<MbrPartitionEntry> entries = Mbr.Parse(disk);
+            for (int index = 0; index < entries.Count; index++) {
+                MbrPartitionEntry entry = entries[index];
+                if (entry.StartSector != partition.StartSector || entry.SectorCount != partition.BlockCount) {
+                    continue;
+                }
+                if (entry.SystemId is 0x07 or 0x0B or 0x0C or 0x83 or 0xA5 or 0xA6 or 0xA9 or 0xAF) {
+                    reason = string.Empty;
+                    return false;
+                }
+
+                reason = entry.SystemId == 0xDA
+                    ? "Yggdrasil metadata partition"
+                    : GetMbrProtectionReason(entry.SystemId);
+                return true;
+            }
+        }
+
+        reason = string.Empty;
+        return false;
+    }
+
+    private static string GetGptProtectionReason(Guid partitionType) {
+        if (partitionType == EfiSystemPartitionType) {
+            return "EFI System partition";
+        }
+        if (partitionType == BiosBootPartitionType) {
+            return "BIOS boot partition";
+        }
+        if (partitionType == MicrosoftReservedPartitionType) {
+            return "Microsoft Reserved partition";
+        }
+        if (partitionType == WindowsRecoveryPartitionType) {
+            return "Windows recovery partition";
+        }
+        if (partitionType == LinuxSwapPartitionType) {
+            return "Linux swap partition";
+        }
+        if (partitionType == MetadataGptPartitionType) {
+            return "Yggdrasil metadata partition";
+        }
+        return $"non-data GPT partition type {partitionType}";
+    }
+
+    private static string GetMbrProtectionReason(byte systemId) {
+        if (systemId == 0xEF) {
+            return "EFI System partition";
+        }
+        if (systemId == 0x27) {
+            return "Windows recovery partition";
+        }
+        if (systemId == 0x82) {
+            return "Linux swap partition";
+        }
+        return $"recognized non-data MBR partition type 0x{systemId:X2}";
+    }
+
+    private static bool TryGetPartitionIndex(Partition partition, out int diskIndex, out int partitionIndex) {
+        IReadOnlyList<IBlockDevice> devices = StorageManager.Devices;
+        for (int currentDiskIndex = 0; currentDiskIndex < devices.Count; currentDiskIndex++) {
+            if (!ReferenceEquals(devices[currentDiskIndex], partition.Host)) {
+                continue;
+            }
+            IReadOnlyList<Partition> partitions = StorageManager.GetPartitions(devices[currentDiskIndex]);
+            for (int currentPartitionIndex = 0; currentPartitionIndex < partitions.Count; currentPartitionIndex++) {
+                Partition candidate = partitions[currentPartitionIndex];
+                if (candidate.StartSector == partition.StartSector && candidate.BlockCount == partition.BlockCount) {
+                    diskIndex = currentDiskIndex;
+                    partitionIndex = currentPartitionIndex;
+                    return true;
+                }
+            }
+        }
+        diskIndex = -1;
+        partitionIndex = -1;
+        return false;
+    }
+
+    private static void HandleResetDisk(string diskArgument) {
+        if (!TryGetDisk(diskArgument, out IBlockDevice? disk, out int diskIndex) || disk is null) {
+            return;
+        }
+
+        string confirmation = $"RESET {diskIndex} {disk.Name}";
+        if (!ConfirmTyped(
+            $"Reset Disk {diskIndex} ({disk.Name})? Existing partitions will be replaced. Type '{confirmation}': ",
+            confirmation)) {
+            ShellOutput.WriteLine("Reset cancelled.");
+            return;
+        }
+        if (!YVolumeManager.PrepareDiskForDestructiveOperation(disk)) {
+            return;
+        }
+
+        bool reserveMetadata = !YVolumeManager.IsRemovableDevice(disk);
+        if (!DiskFormatter.TryResetDisk(disk, reserveMetadata, out Partition? metadataPartition, out Partition? dataPartition)) {
+            ShellOutput.WriteLine($"Failed to reset Disk {diskIndex}; its existing table may have been cleared.");
+            if (metadataPartition is not null) {
+                YVolumeManager.RegisterMetadataPartition(metadataPartition);
+            }
+            return;
+        }
+        if (metadataPartition is not null) {
+            YVolumeManager.RegisterMetadataPartition(metadataPartition);
+        }
+        if (dataPartition is null || !DiskFormatter.TryFormatNewVolume(dataPartition)) {
+            ShellOutput.WriteLine("The layout was reset, but FAT formatting failed.");
+            return;
+        }
+
+        string driveName = YVolumeManager.GetNextAvailableDriveLetter();
+        int volumeNumber = YVolumeManager.GetNextMountNumber();
+        if (driveName.Length != 0 && YVolumeManager.MountVolume(dataPartition, volumeNumber, driveName)) {
+            ShellOutput.WriteLine($"Disk {diskIndex} reset, formatted, and mounted as {driveName}:\\.");
+        } else {
+            ShellOutput.WriteLine("Disk layout reset and formatted, but no drive letter could be assigned.");
+        }
+    }
+
+    private static void HandleWipeDisk(string diskArgument) {
+        if (!TryGetDisk(diskArgument, out IBlockDevice? disk, out int diskIndex) || disk is null) {
+            return;
+        }
+
+        string confirmation = $"WIPE {diskIndex} {disk.Name}";
+        if (!ConfirmTyped(
+            $"Erase every addressable sector on Disk {diskIndex} ({disk.Name})? This is not a hardware secure erase. Type '{confirmation}': ",
+            confirmation)) {
+            ShellOutput.WriteLine("Wipe cancelled.");
+            return;
+        }
+        if (!YVolumeManager.PrepareDiskForDestructiveOperation(disk)) {
+            return;
+        }
+        if (!DiskFormatter.TryWipeDisk(disk)) {
+            ShellOutput.WriteLine($"Could not completely wipe Disk {diskIndex}.");
+            return;
+        }
+        ShellOutput.WriteLine($"Disk {diskIndex} was wiped and has no detected partitions.");
     }
 
     private static void HandleInitDisk(string diskArgument, bool requestMetadata) {
@@ -450,6 +697,11 @@ public static class DiskManagerCli {
         return answer is not null
             && (answer.Equals("y", StringComparison.OrdinalIgnoreCase)
                 || answer.Equals("yes", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool ConfirmTyped(string prompt, string expected) {
+        string answer = ShellLineEditor.ReadLine(prompt, diskManagerMode: true);
+        return answer is not null && answer.Equals(expected, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string[] SplitArgs(string input) {
