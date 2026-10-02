@@ -1,0 +1,44 @@
+<Project Sdk="Cosmos.Sdk/3.0.89">
+
+    <!-- dotnet settings -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>disable</ImplicitUsings>
+    </PropertyGroup>
+
+
+    <!-- Core kernel and System packages -->
+    <ItemGroup>
+        <PackageReference Include="Cosmos.Kernel" Version="3.0.89" />
+        <PackageReference Include="Cosmos.Kernel.System" Version="3.0.89" />
+        <Compile Remove="CursorAsset.g.cs" />
+    </ItemGroup>
+
+
+    <!-- Cosmos Settings -->
+    <PropertyGroup>
+        <CosmosEnableStorage>true</CosmosEnableStorage>
+    </PropertyGroup>
+
+
+    <!-- Extracts the Windows cursor asset for the project -->
+    <Target Name="ExtractWindowsCursor" BeforeTargets="CoreCompile" Condition="$([MSBuild]::IsOSPlatform('Windows')) And Exists('$(WINDIR)\Cursors\aero_arrow.cur')">
+        <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(ProjectDir)tools\ExtractCursor.ps1&quot; -InputPath &quot;$(WINDIR)\Cursors\aero_arrow.cur&quot; -OutputPath &quot;$(IntermediateOutputPath)CursorAsset.g.cs&quot;" />
+        <ItemGroup>
+            <Compile Include="$(IntermediateOutputPath)CursorAsset.g.cs" />
+        </ItemGroup>
+    </Target>
+
+
+    <!-- Redirects build output and intermediate files to the 'Build' directory -->
+    <PropertyGroup>
+        <!-- Redirects 'bin' to 'Build/bin/' -->
+        <BaseOutputPath>Build\bin\</BaseOutputPath>
+
+        <!-- Redirects 'obj' to 'Build/obj/' -->
+        <BaseIntermediateOutputPath>Build\obj\</BaseIntermediateOutputPath>
+    </PropertyGroup>
+
+
+</Project>

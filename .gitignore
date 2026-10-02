@@ -1,0 +1,6 @@
+.history/
+output-*/
+bin/
+obj/
+
+*.img

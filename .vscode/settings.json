@@ -1,0 +1,11 @@
+{
+  "files.associations": {
+    "limine.conf": "ini"
+  },
+  "editor.formatOnSave": false,
+  "editor.formatOnPaste": false,
+  "dotnet.defaultSolution": "disable",
+  "dotrush.roslyn.projectOrSolutionFiles": [
+    "a:\\ReactOs\\yggdrasilOS\\yggdrasilKernel.csproj"
+  ]
+}
