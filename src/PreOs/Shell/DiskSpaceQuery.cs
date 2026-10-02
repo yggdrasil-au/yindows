@@ -4,8 +4,11 @@ using Cosmos.Kernel.HAL.Vfs;
 using Cosmos.Kernel.System.Diagnostics;
 using Cosmos.Kernel.System.Timer;
 using Cosmos.Kernel.System.Vfs;
+using yggdrasilKernel.Storage;
+using yggdrasilKernel.Vfs;
+using yggdrasilKernel;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.PreOs.Shell;
 
 public static class DiskSpaceQuery {
     private static bool _isRunning;

@@ -5,8 +5,11 @@ using Cosmos.Kernel.HAL.Interfaces.Devices;
 using Cosmos.Kernel.HAL.Vfs;
 using Cosmos.Kernel.System.Storage;
 using Cosmos.Kernel.System.Vfs;
+using yggdrasilKernel.Storage;
+using yggdrasilKernel.Vfs;
+using yggdrasilKernel;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.PreOs.Shell;
 
 public static class DiskManagerCli {
     public static void PrintBanner() {

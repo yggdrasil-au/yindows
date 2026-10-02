@@ -49,7 +49,7 @@ try {
             $graphics.ReleaseHdc($hdc)
         }
 
-        $builder = [System.Text.StringBuilder]::new('namespace yggdrasilKernel; public static class CursorAsset { public const int Width = ' + $size + '; public const int Height = ' + $size + '; public static readonly int[] Pixels = [')
+        $builder = [System.Text.StringBuilder]::new('namespace yggdrasilKernel.PreOs.Desktop; public static class CursorAsset { public const int Width = ' + $size + '; public const int Height = ' + $size + '; public static readonly int[] Pixels = [')
         for ($y = 0; $y -lt $size; $y++) {
             for ($x = 0; $x -lt $size; $x++) {
                 [void]$builder.Append($bitmap.GetPixel($x, $y).ToArgb()).Append(',')

@@ -2,8 +2,9 @@ using System;
 using System.Collections.Generic;
 using Cosmos.Kernel.HAL.Interfaces.Devices;
 using Cosmos.Kernel.System.Storage;
+using yggdrasilKernel.Vfs;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.Storage;
 
 public static class DiskFormatter {
     public const ulong MetadataPartitionSectors = 204800;

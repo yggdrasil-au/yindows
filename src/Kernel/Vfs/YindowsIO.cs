@@ -7,8 +7,10 @@ using Cosmos.Kernel.HAL.Interfaces.Devices;
 using Cosmos.Kernel.HAL.Vfs;
 using Cosmos.Kernel.System.Storage;
 using Cosmos.Kernel.System.Vfs;
+using yggdrasilKernel.PreOs.Shell;
+using yggdrasilKernel.Storage;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.Vfs;
 
 public static class YVolumeManager {
     public const int MaxDriveNameLength = 2;

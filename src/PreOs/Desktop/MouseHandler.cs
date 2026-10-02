@@ -1,6 +1,6 @@
 using Cosmos.Kernel.System.Mouse;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.PreOs.Desktop;
 
 public static class MouseHandler {
     private static bool _wasLeftPressed = false;

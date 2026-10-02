@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using Cosmos.Kernel.System.Graphics;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.PreOs.Shell;
 
 public static class ShellOutput {
     private const int MaximumScrollbackLines = 2000;

@@ -5,8 +5,11 @@ using System.Text;
 using Cosmos.Kernel.System.Keyboard;
 using Cosmos.Kernel.System.Mouse;
 using Cosmos.Kernel.System.Timer;
+using yggdrasilKernel.Storage;
+using yggdrasilKernel.Vfs;
+using yggdrasilKernel;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.PreOs.Shell;
 
 public static class ShellLineEditor {
     private static readonly List<string> _history = new();

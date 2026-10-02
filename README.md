@@ -75,15 +75,15 @@ Persistent drive assignments use the v3 raw metadata partition when available an
 
 ## Project Layout
 
-- `src/Kernel.cs`: kernel boot and main shell
-- `src/subsystems/shell/`: shell editor, scrollback, and DiskManager CLI
-- `src/DiskFormatter.cs`: disk partition initialization, metadata layout, and FAT formatting
-- `src/YindowsIO.cs`: volume manager, persistent drive assignments, and path/file wrappers
-- `src/WindowManager.cs`, `src/MouseHandler.cs`: graphical desktop components
+- `src/Kernel.cs`: Cosmos kernel lifecycle and top-level mode dispatch
+- `src/PreOs/Shell/`: pre-Yindows shell, line editor, scrollback, DiskManager CLI, and disk-space query
+- `src/Kernel/Storage/`: disk initialization, metadata layout, and FAT formatting
+- `src/Kernel/Vfs/`: volume manager, persistent drive assignments, and path/file wrappers
+- `src/PreOs/Desktop/`: Yindows window manager, mouse handling, and generated cursor asset
 - `Bootloader/`: Limine boot configuration
 - `tools/`: build-time helper scripts
 
-C# files use the `yggdrasilKernel` namespace; source-folder names are not namespace components.
+The pre-Yindows shell is a kernel-mode maintenance environment, not firmware and not a user-mode process. The shell, DiskManager, storage layer, and current Yindows desktop all run in the same Cosmos kernel with the same privilege level. Cosmos provides kernel-thread scheduling, but this project does not yet implement isolated user processes or a syscall boundary. Source folders are organized by responsibility; namespaces are declared in the C# files.
 
 ## Cosmos Gen 3 References
 

@@ -3,7 +3,7 @@ using Cosmos.Kernel.System.Graphics;
 using Cosmos.Kernel.System.Graphics.Fonts;
 using Cosmos.Kernel.System.Mouse;
 
-namespace yggdrasilKernel;
+namespace yggdrasilKernel.PreOs.Desktop;
 
 public static class WindowManager {
     private static Canvas? _canvas;
