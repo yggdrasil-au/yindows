@@ -33,6 +33,9 @@
 
     <!-- Redirects build output and intermediate files to the 'Build' directory -->
     <PropertyGroup>
+        <CosmosOutputDir>Build\output-x64\</CosmosOutputDir>
+        <IsoFile>Build\output-x64\$(MSBuildProjectName).iso</IsoFile>
+
         <!-- Redirects 'bin' to 'Build/bin/' -->
         <BaseOutputPath>Build\bin\</BaseOutputPath>
 

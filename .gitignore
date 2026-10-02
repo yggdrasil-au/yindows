@@ -3,4 +3,8 @@ output-*/
 bin/
 obj/
 
+.ignore/
+
+
+
 *.img

@@ -4,7 +4,7 @@
   },
   "editor.formatOnSave": false,
   "editor.formatOnPaste": false,
-  "dotnet.defaultSolution": "disable",
+  "dotnet.defaultSolution": "yggdrasilKernel.slnx",
   "dotrush.roslyn.projectOrSolutionFiles": [
     "a:\\ReactOs\\yggdrasilOS\\yggdrasilKernel.csproj"
   ]

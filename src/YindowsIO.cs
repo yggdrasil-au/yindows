@@ -11,29 +11,32 @@ using Cosmos.Kernel.System.Vfs;
 namespace yggdrasilKernel;
 
 public static class YVolumeManager {
+    public const int MaxDriveNameLength = 2;
     private const ulong MinimumFixedDiskBytes = 1024UL * 1024 * 1024;
-    private const int RegistryCopySectors = 2;
+    private const ulong MinimumMetadataFileBytes = 500UL * 1024 * 1024;
     private const int RegistryCopies = 2;
     private const int RegistryHeaderSize = 28;
-    private const int RegistryRecordSize = 25;
-    private const int MaximumRegistryRecords = (RegistryCopySectors * 512 - RegistryHeaderSize) / RegistryRecordSize;
-    private const uint RegistryVersion = 1;
+    private const uint RegistryVersion = 3;
+    private static readonly int RegistryRecordSize = 25 + MaxDriveNameLength;
+    private static readonly int MaximumRegistryRecords = GetDriveNameCapacity(MaxDriveNameLength);
+    private static readonly int RegistryCopySectors = (RegistryHeaderSize + MaximumRegistryRecords * RegistryRecordSize + 511) / 512;
     private const string RegistryMagic = "YVMETA01";
-    private const string RegistryFileName = "/.YVOLMAP";
+    private const string RegistryFileName = "/.metaDisk";
 
-    private static readonly Dictionary<char, string> _driveLinks = new();
-    private static readonly Dictionary<char, string> _currentDirectories = new();
+    private static readonly Dictionary<string, string> _driveLinks = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, string> _currentDirectories = new(StringComparer.OrdinalIgnoreCase);
     private static Partition? _metadataPartition;
 
-    public static char CurrentDrive { get; private set; } = 'C';
+    public static string CurrentDrive { get; private set; } = "C";
 
     public static void InitializeStorage() {
         IReadOnlyList<IBlockDevice> devices = StorageManager.Devices;
         if (devices.Count == 0) {
-            Console.WriteLine("No storage devices found.");
+            ShellOutput.WriteLine("No storage devices found.");
             return;
         }
 
+        _metadataPartition = FindMetadataPartition();
         for (int index = 0; index < devices.Count; index++) {
             IBlockDevice device = devices[index];
             if (StorageManager.GetPartitions(device).Count != 0) {
@@ -42,19 +45,22 @@ public static class YVolumeManager {
 
             bool removable = IsRemovableDevice(device);
             if (removable) {
-                Console.WriteLine($"{device.Name}: under 1 GiB; treating as removable and not creating a metadata partition.");
+                ShellOutput.WriteLine($"{device.Name}: under 1 GiB; treating as removable and not creating a metadata partition.");
             }
 
-            if (!DiskFormatter.TryInitializeDisk(device, !removable, out Partition? metadata, out Partition? data)) {
-                Console.WriteLine($"{device.Name}: no partitions initialized; disk is not blank, unsupported, or too small.");
+            bool initialized = DiskFormatter.TryInitializeDisk(device, !removable && _metadataPartition is null,
+                out Partition? metadata, out Partition? data);
+            if (metadata is not null) {
+                _metadataPartition = metadata;
+                InitializeMetadataPartition(metadata);
+            }
+            if (!initialized) {
+                ShellOutput.WriteLine($"{device.Name}: no partitions initialized; disk is not blank, unsupported, or too small.");
                 continue;
             }
 
-            if (metadata is not null) {
-                InitializeMetadataPartition(metadata);
-            }
             if (data is not null && !DiskFormatter.TryFormatNewVolume(data)) {
-                Console.WriteLine($"{device.Name}: formatting the new data partition failed.");
+                ShellOutput.WriteLine($"{device.Name}: formatting the new data partition failed.");
             }
         }
 
@@ -77,7 +83,7 @@ public static class YVolumeManager {
         }
 
         if (_metadataPartition is null) {
-            Console.WriteLine("No fixed-disk metadata partition is available; drive letters are temporary for this boot.");
+            ShellOutput.WriteLine("No fixed-disk metadata partition is available; drive letters may not be persistent.");
         }
 
         List<Partition> volumes = new();
@@ -105,45 +111,46 @@ public static class YVolumeManager {
             string mountPath = $"/Device/HarddiskVolume{volumeNumber++}";
             mountPaths.Add(mountPath);
             if (!VfsManager.TryMount("fat", partition, MountFlags.None, mountPath, out VfsManager.VfsMount? mount)) {
-                Console.WriteLine($"Mount failed for {partition.Name} at {mountPath}; it was not formatted.");
+                ShellOutput.WriteLine($"Mount failed for {partition.Name} at {mountPath}; it was not formatted.");
                 continue;
             }
 
             mounted[index] = true;
-            Console.WriteLine($"Mounted {partition.Name} at {mount.MountPoint}");
-            if (VfsManager.TryStatFs(mountPath, out VfsStatFs stats)) {
-                ulong freeBytes = stats.Bavail * stats.BlockSize;
-                ulong totalBytes = stats.Blocks * stats.BlockSize;
-                Console.WriteLine($"  {freeBytes} of {totalBytes} bytes free");
-            }
+            ShellOutput.WriteLine($"Mounted {partition.Name} at {mount.MountPoint}");
         }
 
-        List<DriveRecord> records = _metadataPartition is null
-            ? ReadRegistryFiles(mountPaths, mounted)
-            : ReadRegistry(_metadataPartition, out _, out _);
-        char[] letters = AssignLetters(volumes, deviceKeys, records);
+        List<DriveRecord> fileRecords = ReadRegistryFiles(mountPaths, mounted, volumes);
+        List<DriveRecord> records;
+        if (_metadataPartition is null) {
+            records = fileRecords;
+        } else {
+            records = ReadRegistry(_metadataPartition, out _, out int activeSlot);
+            if (activeSlot < 0) {
+                records = fileRecords;
+            }
+        }
+        string[] driveNames = AssignLetters(volumes, deviceKeys, records);
         for (int index = 0; index < volumes.Count; index++) {
-            char letter = letters[index];
+            string driveName = driveNames[index];
             if (!mounted[index]) {
                 continue;
             }
-            if (letter == '\0') {
-                Console.WriteLine($"Skipping {volumes[index].Name}: no drive letters remain.");
+            if (driveName.Length == 0) {
+                ShellOutput.WriteLine($"Skipping {volumes[index].Name}: no drive letters remain.");
                 continue;
             }
 
-            AssignDriveLetter(letter, mountPaths[index]);
-            Console.WriteLine($"{letter}:\\ -> {mountPaths[index]} ({volumes[index].Name})");
+            AssignDriveLetter(driveName, mountPaths[index]);
+            ShellOutput.WriteLine($"{driveName}:\\ -> {mountPaths[index]} ({volumes[index].Name})");
         }
 
         if (_metadataPartition is not null) {
             SaveRegistry(_metadataPartition, records);
-        } else {
-            SaveRegistryFiles(mountPaths, mounted, records);
         }
+        SaveRegistryFiles(mountPaths, mounted, volumes, records);
 
-        if (!SetCurrentDrive('C')) {
-            foreach (KeyValuePair<char, string> drive in _driveLinks) {
+        if (!SetCurrentDrive("C")) {
+            foreach (KeyValuePair<string, string> drive in _driveLinks) {
                 SetCurrentDrive(drive.Key);
                 break;
             }
@@ -151,43 +158,151 @@ public static class YVolumeManager {
     }
 
     public static bool MountVolume(Partition partition, int volumeNumber, char driveLetter) {
+        return MountVolume(partition, volumeNumber, driveLetter.ToString());
+    }
+
+    public static bool MountVolume(Partition partition, int volumeNumber, string driveName) {
         string mountPath = $"/Device/HarddiskVolume{volumeNumber}";
+        return MountVolume(partition, mountPath, driveName);
+    }
+
+    public static bool MountVolume(Partition partition, string mountPath, char driveLetter) {
+        return MountVolume(partition, mountPath, driveLetter.ToString());
+    }
+
+    public static bool MountVolume(Partition partition, string mountPath, string driveName) {
+        string? existingMount = GetMountPointForPartition(partition);
+        if (existingMount is not null) {
+            if (!string.Equals(existingMount, mountPath, StringComparison.OrdinalIgnoreCase)) {
+                return false;
+            }
+            AssignDriveLetter(driveName, existingMount);
+            return true;
+        }
+
         if (!VfsManager.TryMount("fat", partition, MountFlags.None, mountPath, out _)) {
             return false;
         }
-        AssignDriveLetter(driveLetter, mountPath);
+        AssignDriveLetter(driveName, mountPath);
         return true;
     }
 
     public static void AssignDriveLetter(char driveLetter, string ntDevicePath) {
-        char upper = char.ToUpperInvariant(driveLetter);
-        string root = ntDevicePath.TrimEnd('/');
-        _driveLinks[upper] = root;
-        if (!_currentDirectories.ContainsKey(upper)) {
-            _currentDirectories[upper] = root;
+        AssignDriveLetter(driveLetter.ToString(), ntDevicePath);
+    }
+
+    public static void AssignDriveLetter(string driveName, string ntDevicePath) {
+        if (!TryNormalizeDriveName(driveName, out string normalizedDriveName)) {
+            throw new ArgumentException($"Drive name must contain 1 to {MaxDriveNameLength} ASCII letters.", nameof(driveName));
         }
+        string root = ntDevicePath.TrimEnd('/');
+
+        List<string> oldDriveNames = new();
+        foreach (KeyValuePair<string, string> drive in _driveLinks) {
+            if (!string.Equals(drive.Key, normalizedDriveName, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(drive.Value, root, StringComparison.OrdinalIgnoreCase)) {
+                oldDriveNames.Add(drive.Key);
+            }
+        }
+        for (int index = 0; index < oldDriveNames.Count; index++) {
+            _driveLinks.Remove(oldDriveNames[index]);
+            _currentDirectories.Remove(oldDriveNames[index]);
+        }
+
+        if (_driveLinks.TryGetValue(normalizedDriveName, out string? previousRoot)
+            && !string.Equals(previousRoot, root, StringComparison.OrdinalIgnoreCase)) {
+            _currentDirectories.Remove(normalizedDriveName);
+        }
+        _driveLinks[normalizedDriveName] = root;
+        if (!_currentDirectories.TryGetValue(normalizedDriveName, out string? currentDirectory)
+            || !(currentDirectory.Equals(root, StringComparison.OrdinalIgnoreCase)
+                || currentDirectory.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))) {
+            _currentDirectories[normalizedDriveName] = root;
+        }
+        if (!string.Equals(CurrentDrive, normalizedDriveName, StringComparison.OrdinalIgnoreCase)
+            && oldDriveNames.Exists(oldDriveName => string.Equals(oldDriveName, CurrentDrive, StringComparison.OrdinalIgnoreCase))) {
+            CurrentDrive = normalizedDriveName;
+        }
+        PersistDriveAssignment(normalizedDriveName, root);
     }
 
     public static bool TryGetVolumePath(char driveLetter, out string ntDevicePath) {
-        return _driveLinks.TryGetValue(char.ToUpperInvariant(driveLetter), out ntDevicePath!);
+        return TryGetVolumePath(driveLetter.ToString(), out ntDevicePath);
     }
 
-    public static IReadOnlyDictionary<char, string> GetDrives() => _driveLinks;
+    public static bool TryGetVolumePath(string driveName, out string ntDevicePath) {
+        if (TryNormalizeDriveName(driveName, out string normalizedDriveName)) {
+            return _driveLinks.TryGetValue(normalizedDriveName, out ntDevicePath!);
+        }
+        ntDevicePath = string.Empty;
+        return false;
+    }
+
+    public static IReadOnlyDictionary<string, string> GetDrives() => _driveLinks;
+
+    public static string GetDriveLetterForMount(string mountPoint) {
+        string normalized = mountPoint.TrimEnd('/');
+        foreach (KeyValuePair<string, string> drive in _driveLinks) {
+            if (string.Equals(drive.Value, normalized, StringComparison.OrdinalIgnoreCase)) {
+                return drive.Key;
+            }
+        }
+        return string.Empty;
+    }
+
+    public static string? GetMountPointForPartition(Partition partition) {
+        IReadOnlyList<VfsManager.VfsMount> mounts = VfsManager.Mounts;
+        for (int index = 0; index < mounts.Count; index++) {
+            if (ReferenceEquals(mounts[index].Partition, partition)) {
+                return mounts[index].MountPoint;
+            }
+        }
+        return null;
+    }
+
+    public static string GetNextAvailableDriveLetter() {
+        return NextAvailableDriveName(new HashSet<string>(_driveLinks.Keys, StringComparer.OrdinalIgnoreCase));
+    }
+
+    public static int GetNextMountNumber() {
+        int number = 1;
+        while (VfsManager.TryGetMount($"/Device/HarddiskVolume{number}", out _)) {
+            number++;
+        }
+        return number;
+    }
+
+    public static void RegisterMetadataPartition(Partition partition) {
+        if (IsRemovableDevice(partition.Host)) {
+            return;
+        }
+        if (!IsMetadataPartition(partition)) {
+            InitializeMetadataPartition(partition);
+        }
+        if (IsMetadataPartition(partition)
+            && (_metadataPartition is null || ReferenceEquals(_metadataPartition, partition))) {
+            _metadataPartition = partition;
+        }
+    }
 
     public static bool SetCurrentDrive(char driveLetter) {
-        char upper = char.ToUpperInvariant(driveLetter);
-        if (!_driveLinks.TryGetValue(upper, out string? root)) {
+        return SetCurrentDrive(driveLetter.ToString());
+    }
+
+    public static bool SetCurrentDrive(string driveName) {
+        if (!TryNormalizeDriveName(driveName, out string normalizedDriveName)
+            || !_driveLinks.TryGetValue(normalizedDriveName, out string? root)) {
             return false;
         }
 
-        CurrentDrive = upper;
-        string currentDirectory = _currentDirectories.TryGetValue(upper, out string? saved) ? saved : root;
+        CurrentDrive = normalizedDriveName;
+        string currentDirectory = _currentDirectories.TryGetValue(normalizedDriveName, out string? saved) ? saved : root;
         Directory.SetCurrentDirectory(currentDirectory);
         return true;
     }
 
     public static void UpdateCurrentDirectory(string vfsPath) {
-        foreach (KeyValuePair<char, string> drive in _driveLinks) {
+        foreach (KeyValuePair<string, string> drive in _driveLinks) {
             if (vfsPath.Equals(drive.Value, StringComparison.OrdinalIgnoreCase)
                 || vfsPath.StartsWith(drive.Value + "/", StringComparison.OrdinalIgnoreCase)) {
                 CurrentDrive = drive.Key;
@@ -198,21 +313,55 @@ public static class YVolumeManager {
     }
 
     internal static bool TryGetCurrentDirectory(char driveLetter, out string directory) {
-        char upper = char.ToUpperInvariant(driveLetter);
-        if (_currentDirectories.TryGetValue(upper, out string? saved)) {
+        return TryGetCurrentDirectory(driveLetter.ToString(), out directory);
+    }
+
+    internal static bool TryGetCurrentDirectory(string driveName, out string directory) {
+        if (TryNormalizeDriveName(driveName, out string normalizedDriveName)
+            && _currentDirectories.TryGetValue(normalizedDriveName, out string? saved)) {
             directory = saved;
             return true;
         }
-        return TryGetVolumePath(upper, out directory!);
+        return TryGetVolumePath(driveName, out directory!);
+    }
+
+    public static bool TryNormalizeDriveName(string value, out string driveName) {
+        string candidate = value.Trim().TrimEnd(':', '\\', '/');
+        if (candidate.Length == 0 || candidate.Length > MaxDriveNameLength) {
+            driveName = string.Empty;
+            return false;
+        }
+        for (int index = 0; index < candidate.Length; index++) {
+            char character = candidate[index];
+            if (!((character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z'))) {
+                driveName = string.Empty;
+                return false;
+            }
+        }
+        driveName = candidate.ToUpperInvariant();
+        return true;
+    }
+
+    private static int GetDriveNameCapacity(int maximumLength) {
+        long combinations = 1;
+        long count = 0;
+        for (int length = 1; length <= maximumLength; length++) {
+            combinations *= 26;
+            count += length == 1 ? combinations - 2 : combinations;
+            if (count > int.MaxValue) {
+                return int.MaxValue;
+            }
+        }
+        return (int)count;
     }
 
     public static bool IsRemovableDevice(IBlockDevice device) {
         return device.BlockSize == 0 || device.BlockCount < MinimumFixedDiskBytes / device.BlockSize;
     }
 
-    private static char[] AssignLetters(List<Partition> volumes, List<ulong> deviceKeys, List<DriveRecord> records) {
-        char[] assigned = new char[volumes.Count];
-        HashSet<char> used = new();
+    private static string[] AssignLetters(List<Partition> volumes, List<ulong> deviceKeys, List<DriveRecord> records) {
+        string[] assigned = new string[volumes.Count];
+        HashSet<string> used = new(StringComparer.OrdinalIgnoreCase);
 
         for (int recordIndex = 0; recordIndex < records.Count; recordIndex++) {
             DriveRecord record = records[recordIndex];
@@ -232,17 +381,17 @@ public static class YVolumeManager {
             Partition volume = volumes[volumeIndex];
             ulong deviceKey = deviceKeys[volumeIndex];
             int recordIndex = FindRecord(records, deviceKey, volume);
-            char letter = recordIndex >= 0 && !used.Contains(records[recordIndex].Letter)
+            string driveName = recordIndex >= 0 && !used.Contains(records[recordIndex].Letter)
                 ? records[recordIndex].Letter
-                : NextAvailableLetter(used);
+                : NextAvailableDriveName(used);
 
-            if (letter == '\0') {
+            if (driveName.Length == 0) {
                 continue;
             }
 
-            assigned[volumeIndex] = letter;
-            used.Add(letter);
-            DriveRecord updated = new(deviceKey, volume.StartSector, volume.BlockCount, letter);
+            assigned[volumeIndex] = driveName;
+            used.Add(driveName);
+            DriveRecord updated = new(deviceKey, volume.StartSector, volume.BlockCount, driveName);
             if (recordIndex >= 0) {
                 records[recordIndex] = updated;
             } else if (records.Count < MaximumRegistryRecords) {
@@ -253,13 +402,34 @@ public static class YVolumeManager {
         return assigned;
     }
 
-    private static char NextAvailableLetter(HashSet<char> used) {
-        for (char letter = 'C'; letter <= 'Z'; letter++) {
-            if (!used.Contains(letter)) {
-                return letter;
+    private static string NextAvailableDriveName(HashSet<string> used) {
+        for (int length = 1; length <= MaxDriveNameLength; length++) {
+            if (TryFindAvailableDriveName(new StringBuilder(length), length, used, out string driveName)) {
+                return driveName;
             }
         }
-        return '\0';
+        return string.Empty;
+    }
+
+    private static bool TryFindAvailableDriveName(StringBuilder prefix, int length, HashSet<string> used, out string driveName) {
+        if (prefix.Length == length) {
+            driveName = prefix.ToString();
+            if (length == 1 && driveName[0] < 'C') {
+                return false;
+            }
+            return !used.Contains(driveName);
+        }
+
+        for (char letter = 'A'; letter <= 'Z'; letter++) {
+            prefix.Append(letter);
+            if (TryFindAvailableDriveName(prefix, length, used, out driveName)) {
+                return true;
+            }
+            prefix.Length--;
+        }
+
+        driveName = string.Empty;
+        return false;
     }
 
     private static int FindRecord(List<DriveRecord> records, ulong deviceKey, Partition partition) {
@@ -308,14 +478,18 @@ public static class YVolumeManager {
         return null;
     }
 
-    private static bool IsMetadataPartition(Partition partition) {
-        if (partition.BlockSize != 512 || partition.BlockCount < RegistryCopySectors * RegistryCopies) {
+    public static bool IsMetadataPartition(Partition partition) {
+        if (partition.BlockSize != 512 || partition.BlockCount < (ulong)RegistryCopySectors * RegistryCopies) {
             return false;
         }
         try {
             byte[] sector = new byte[512];
             partition.ReadBlock(0, 1, sector);
-            return HasMagic(sector, 0);
+            if (IsCurrentRegistryHeader(sector)) {
+                return true;
+            }
+            partition.ReadBlock((ulong)RegistryCopySectors, 1, sector);
+            return IsCurrentRegistryHeader(sector);
         } catch (Exception) {
             return false;
         }
@@ -332,7 +506,7 @@ public static class YVolumeManager {
         sequence = 0;
         activeSlot = -1;
         List<DriveRecord> records = new();
-        if (partition.BlockSize != 512 || partition.BlockCount < RegistryCopySectors * RegistryCopies) {
+        if (partition.BlockSize != 512 || partition.BlockCount < (ulong)RegistryCopySectors * RegistryCopies) {
             return records;
         }
 
@@ -352,12 +526,12 @@ public static class YVolumeManager {
         sequence = 0;
         byte[] data = new byte[RegistryCopySectors * 512];
         try {
-            partition.ReadBlock((ulong)(slot * RegistryCopySectors), RegistryCopySectors, data);
+            partition.ReadBlock((ulong)(slot * RegistryCopySectors), (ulong)RegistryCopySectors, data);
         } catch (Exception) {
             return false;
         }
 
-        if (!HasMagic(data, 0) || ReadUInt32(data, 8) != RegistryVersion) {
+        if (!IsCurrentRegistryHeader(data)) {
             return false;
         }
 
@@ -370,13 +544,17 @@ public static class YVolumeManager {
         int offset = RegistryHeaderSize;
         for (uint index = 0; index < count; index++) {
             ulong deviceKey = ReadUInt64(data, offset);
-            ulong startSector = ReadUInt64(data, offset + 8);
+            ulong recordStartSector = ReadUInt64(data, offset + 8);
             ulong sectorCount = ReadUInt64(data, offset + 16);
-            char letter = (char)data[offset + 24];
-            if (letter < 'C' || letter > 'Z' || sectorCount == 0) {
+            int driveNameLength = data[offset + 24];
+            if (driveNameLength <= 0 || driveNameLength > MaxDriveNameLength) {
                 return false;
             }
-            records.Add(new DriveRecord(deviceKey, startSector, sectorCount, letter));
+            string driveName = Encoding.ASCII.GetString(data, offset + 25, driveNameLength);
+            if (!TryNormalizeDriveName(driveName, out driveName) || sectorCount == 0) {
+                return false;
+            }
+            records.Add(new DriveRecord(deviceKey, recordStartSector, sectorCount, driveName));
             offset += RegistryRecordSize;
         }
         return true;
@@ -387,43 +565,129 @@ public static class YVolumeManager {
         WriteRegistry(partition, records, sequence, activeSlot);
     }
 
-    private static List<DriveRecord> ReadRegistryFiles(List<string> mountPaths, bool[] mounted) {
+    private static List<DriveRecord> ReadRegistryFiles(List<string> mountPaths, bool[] mounted, IReadOnlyList<Partition> partitions) {
         List<DriveRecord> records = new();
         for (int mountIndex = 0; mountIndex < mountPaths.Count; mountIndex++) {
             if (!mounted[mountIndex]) {
                 continue;
             }
+            Partition partition = partitions[mountIndex];
+            ulong ownDeviceKey = GetDeviceKey(partition.Host);
 
-            try {
-                string[] lines = File.ReadAllText(mountPaths[mountIndex] + RegistryFileName).Split('\n');
-                if (lines.Length == 0 || lines[0].TrimEnd('\r') != RegistryMagic) {
-                    continue;
+            List<DriveRecord> partitionRecords = new();
+            TryReadRegistryFile(mountPaths[mountIndex] + RegistryFileName, partitionRecords);
+            for (int index = 0; index < partitionRecords.Count; index++) {
+                DriveRecord record = partitionRecords[index];
+                int existingIndex = FindRecord(records, record.DeviceKey, partition);
+                bool isOwnRecord = record.DeviceKey == ownDeviceKey
+                    && record.StartSector == partition.StartSector && record.SectorCount == partition.BlockCount;
+                if (existingIndex >= 0 && isOwnRecord) {
+                    records[existingIndex] = record;
+                } else if (existingIndex < 0 && records.Count < MaximumRegistryRecords) {
+                    records.Add(record);
                 }
-
-                for (int lineIndex = 1; lineIndex < lines.Length; lineIndex++) {
-                    string[] fields = lines[lineIndex].TrimEnd('\r').Split('|');
-                    if (fields.Length != 4
-                        || !ulong.TryParse(fields[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong deviceKey)
-                        || !ulong.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out ulong startSector)
-                        || !ulong.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out ulong sectorCount)
-                        || fields[3].Length != 1 || fields[3][0] < 'C' || fields[3][0] > 'Z'
-                        || sectorCount == 0) {
-                        continue;
-                    }
-
-                    DriveRecord record = new(deviceKey, startSector, sectorCount, fields[3][0]);
-                    if (FindRecord(records, record.DeviceKey, new Partition(record.DeviceKey.ToString(CultureInfo.InvariantCulture), record.StartSector, record.SectorCount, "")) < 0
-                        && records.Count < MaximumRegistryRecords) {
-                        records.Add(record);
-                    }
-                }
-            } catch (IOException) {
             }
         }
         return records;
     }
 
-    private static void SaveRegistryFiles(List<string> mountPaths, bool[] mounted, List<DriveRecord> records) {
+    private static bool TryReadRegistryFile(string path, List<DriveRecord> records) {
+        try {
+            string[] lines = File.ReadAllText(path).Split('\n');
+            if (lines.Length == 0 || lines[0].TrimEnd('\r') != RegistryMagic) {
+                return false;
+            }
+
+            for (int lineIndex = 1; lineIndex < lines.Length; lineIndex++) {
+                string[] fields = lines[lineIndex].TrimEnd('\r').Split('|');
+                if (fields.Length != 4
+                    || !ulong.TryParse(fields[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out ulong deviceKey)
+                    || !ulong.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out ulong startSector)
+                    || !ulong.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out ulong sectorCount)
+                    || !TryNormalizeDriveName(fields[3], out string driveName)
+                    || sectorCount == 0) {
+                    continue;
+                }
+
+                DriveRecord record = new(deviceKey, startSector, sectorCount, driveName);
+                if (!ContainsRecord(records, record) && records.Count < MaximumRegistryRecords) {
+                    records.Add(record);
+                }
+            }
+            return true;
+        } catch (IOException) {
+            return false;
+        }
+    }
+
+    private static void PersistDriveAssignment(string driveName, string mountPath) {
+        Partition? target = null;
+        IReadOnlyList<VfsManager.VfsMount> mounts = VfsManager.Mounts;
+        List<string> mountPaths = new(mounts.Count);
+        List<Partition> partitions = new(mounts.Count);
+        List<bool> mountedPartitions = new(mounts.Count);
+        for (int index = 0; index < mounts.Count; index++) {
+            VfsManager.VfsMount mount = mounts[index];
+            if (mount.Partition is null) {
+                continue;
+            }
+            mountPaths.Add(mount.MountPoint);
+            partitions.Add(mount.Partition);
+            mountedPartitions.Add(true);
+            if (string.Equals(mount.MountPoint, mountPath, StringComparison.OrdinalIgnoreCase)) {
+                target = mount.Partition;
+            }
+        }
+        if (target is null) {
+            return;
+        }
+
+        bool[] mounted = mountedPartitions.ToArray();
+        List<DriveRecord> fileRecords = ReadRegistryFiles(mountPaths, mounted, partitions);
+        List<DriveRecord> records;
+        if (_metadataPartition is null) {
+            records = fileRecords;
+        } else {
+            records = ReadRegistry(_metadataPartition, out _, out int activeSlot);
+            if (activeSlot < 0) {
+                records = fileRecords;
+            }
+        }
+        DriveRecord assignment = new(GetDeviceKey(target.Host), target.StartSector, target.BlockCount, driveName);
+        for (int index = records.Count - 1; index >= 0; index--) {
+            DriveRecord record = records[index];
+            bool sameVolume = record.DeviceKey == assignment.DeviceKey
+                && record.StartSector == assignment.StartSector && record.SectorCount == assignment.SectorCount;
+            if (string.Equals(record.Letter, driveName, StringComparison.OrdinalIgnoreCase) && !sameVolume) {
+                records.RemoveAt(index);
+            }
+        }
+
+        int recordIndex = FindRecord(records, assignment.DeviceKey, target);
+        if (recordIndex >= 0) {
+            records[recordIndex] = assignment;
+        } else if (records.Count < MaximumRegistryRecords) {
+            records.Add(assignment);
+        }
+
+        if (_metadataPartition is not null) {
+            SaveRegistry(_metadataPartition, records);
+        }
+        SaveRegistryFiles(mountPaths, mounted, partitions, records);
+    }
+
+    private static bool ContainsRecord(List<DriveRecord> records, DriveRecord candidate) {
+        for (int index = 0; index < records.Count; index++) {
+            DriveRecord record = records[index];
+            if (record.DeviceKey == candidate.DeviceKey && record.StartSector == candidate.StartSector
+                && record.SectorCount == candidate.SectorCount) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void SaveRegistryFiles(List<string> mountPaths, bool[] mounted, IReadOnlyList<Partition> partitions, List<DriveRecord> records) {
         StringBuilder contents = new();
         contents.Append(RegistryMagic).Append('\n');
         for (int index = 0; index < records.Count; index++) {
@@ -436,15 +700,33 @@ public static class YVolumeManager {
 
         string registry = contents.ToString();
         for (int mountIndex = 0; mountIndex < mountPaths.Count; mountIndex++) {
-            if (!mounted[mountIndex]) {
+            if (!mounted[mountIndex] || !ShouldPersistMetadataFile(partitions[mountIndex])) {
                 continue;
             }
             try {
                 File.WriteAllText(mountPaths[mountIndex] + RegistryFileName, registry);
             } catch (IOException) {
-                Console.WriteLine($"Could not save drive-letter metadata on {mountPaths[mountIndex]}.");
+                ShellOutput.WriteLine($"Could not save drive-letter metadata on {mountPaths[mountIndex]}.");
             }
         }
+    }
+
+    private static bool ShouldPersistMetadataFile(Partition partition) {
+        return partition.BlockSize != 0
+            && (partition.BlockCount > MinimumMetadataFileBytes / partition.BlockSize
+                || IsRemovableDevice(partition.Host));
+    }
+
+    public static string FormatSize(ulong bytes) {
+        const ulong unit = 1024;
+        string[] units = { "B", "KiB", "MiB", "GiB", "TiB", "PiB" };
+        double value = bytes;
+        int unitIndex = 0;
+        while (value >= unit && unitIndex < units.Length - 1) {
+            value /= unit;
+            unitIndex++;
+        }
+        return value.ToString(unitIndex == 0 ? "0" : "0.##", CultureInfo.InvariantCulture) + " " + units[unitIndex];
     }
 
     private static void WriteRegistry(Partition partition, List<DriveRecord> records, ulong sequence, int activeSlot) {
@@ -464,11 +746,14 @@ public static class YVolumeManager {
             WriteUInt64(data, offset, record.DeviceKey);
             WriteUInt64(data, offset + 8, record.StartSector);
             WriteUInt64(data, offset + 16, record.SectorCount);
-            data[offset + 24] = (byte)record.Letter;
+            data[offset + 24] = (byte)record.Letter.Length;
+            for (int letterIndex = 0; letterIndex < record.Letter.Length; letterIndex++) {
+                data[offset + 25 + letterIndex] = (byte)record.Letter[letterIndex];
+            }
             offset += RegistryRecordSize;
         }
         WriteUInt32(data, 24, ComputeChecksum(data));
-        partition.WriteBlock((ulong)(targetSlot * RegistryCopySectors), RegistryCopySectors, data);
+        partition.WriteBlock((ulong)(targetSlot * RegistryCopySectors), (ulong)RegistryCopySectors, data);
         partition.Flush();
     }
 
@@ -479,6 +764,10 @@ public static class YVolumeManager {
             }
         }
         return true;
+    }
+
+    private static bool IsCurrentRegistryHeader(byte[] data) {
+        return HasMagic(data, 0) && ReadUInt32(data, 8) == RegistryVersion;
     }
 
     private static void WriteMagic(byte[] data, int offset) {
@@ -520,7 +809,7 @@ public static class YVolumeManager {
     }
 
     private readonly struct DriveRecord {
-        public DriveRecord(ulong deviceKey, ulong startSector, ulong sectorCount, char letter) {
+        public DriveRecord(ulong deviceKey, ulong startSector, ulong sectorCount, string letter) {
             DeviceKey = deviceKey;
             StartSector = startSector;
             SectorCount = sectorCount;
@@ -530,7 +819,7 @@ public static class YVolumeManager {
         public ulong DeviceKey { get; }
         public ulong StartSector { get; }
         public ulong SectorCount { get; }
-        public char Letter { get; }
+        public string Letter { get; }
     }
 }
 
@@ -553,47 +842,31 @@ public static class YPath {
         string remainder;
         int floor;
 
-        if (value.Length >= 2 && char.IsLetter(value[0]) && value[1] == ':') {
-            char drive = char.ToUpperInvariant(value[0]);
-            string volumeRoot = YVolumeManager.TryGetVolumePath(drive, out string mappedRoot) ? mappedRoot : $"/Unmounted_{drive}";
+        int colonIndex = value.IndexOf(':');
+        if (colonIndex > 0 && colonIndex <= YVolumeManager.MaxDriveNameLength
+            && YVolumeManager.TryNormalizeDriveName(value.Substring(0, colonIndex), out string driveName)) {
+            string suffix = value.Substring(colonIndex + 1);
+            bool rooted = suffix.StartsWith("/", StringComparison.Ordinal);
+            string volumeRoot = YVolumeManager.TryGetVolumePath(driveName, out string mappedRoot)
+                ? mappedRoot
+                : $"/Unmounted_{driveName}";
             floor = CountSegments(volumeRoot);
-            if (value.Length > 2 && value[2] == '/') {
+            if (rooted) {
                 root = volumeRoot;
-                remainder = value.Substring(3);
+                remainder = suffix.TrimStart('/');
             } else {
-                root = YVolumeManager.TryGetCurrentDirectory(drive, out string driveDirectory) ? driveDirectory : volumeRoot;
-                remainder = value.Substring(2);
+                root = YVolumeManager.TryGetCurrentDirectory(driveName, out string driveDirectory)
+                    ? driveDirectory
+                    : volumeRoot;
+                remainder = suffix;
             }
-        } else if (value.Length >= 2 && value[0] == '/' && char.IsLetter(value[1])
-            && (value.Length == 2 || value[2] == '/')) {
-            char drive = char.ToUpperInvariant(value[1]);
-            if (YVolumeManager.TryGetVolumePath(drive, out string mappedRoot)) {
-                root = mappedRoot;
-                remainder = value.Length > 2 ? value.Substring(3) : string.Empty;
-                floor = CountSegments(root);
-            } else {
-                root = "/";
-                remainder = value.TrimStart('/');
-                floor = 0;
-            }
-        } else if (value.StartsWith("/Device/", StringComparison.OrdinalIgnoreCase) || value.Equals("/Device", StringComparison.OrdinalIgnoreCase)) {
+        } else if (value.StartsWith("/Device/", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("/Device", StringComparison.OrdinalIgnoreCase)) {
             root = "/";
             remainder = value.TrimStart('/');
             floor = 0;
-        } else if (value.StartsWith('/')) {
-            if (value == "/") {
-                root = "/";
-                remainder = string.Empty;
-                floor = 0;
-            } else if (YVolumeManager.TryGetVolumePath(YVolumeManager.CurrentDrive, out string currentRoot)) {
-                root = currentRoot;
-                remainder = value.TrimStart('/');
-                floor = CountSegments(root);
-            } else {
-                root = "/";
-                remainder = value.TrimStart('/');
-                floor = 0;
-            }
+        } else if (value.StartsWith("/", StringComparison.Ordinal)) {
+            root = ResolveRootedPath(value, out remainder, out floor);
         } else {
             root = Directory.GetCurrentDirectory();
             remainder = value;
@@ -606,9 +879,9 @@ public static class YPath {
 
     public static string ToWindowsDisplay(string anyPath) {
         string vfsPath = ToVfs(anyPath);
-        char selectedDrive = '\0';
+        string selectedDrive = string.Empty;
         string selectedRoot = string.Empty;
-        foreach (KeyValuePair<char, string> drive in YVolumeManager.GetDrives()) {
+        foreach (KeyValuePair<string, string> drive in YVolumeManager.GetDrives()) {
             if ((vfsPath.Equals(drive.Value, StringComparison.OrdinalIgnoreCase)
                 || vfsPath.StartsWith(drive.Value + "/", StringComparison.OrdinalIgnoreCase))
                 && drive.Value.Length > selectedRoot.Length) {
@@ -617,13 +890,24 @@ public static class YPath {
             }
         }
 
-        if (selectedDrive == '\0') {
+        if (selectedDrive.Length == 0) {
             return vfsPath.Replace('/', '\\');
         }
         string subPath = vfsPath.Length == selectedRoot.Length
             ? string.Empty
             : vfsPath.Substring(selectedRoot.Length + 1).Replace('/', '\\');
         return subPath.Length == 0 ? $"{selectedDrive}:\\" : $"{selectedDrive}:\\{subPath}";
+    }
+
+    private static string ResolveRootedPath(string value, out string remainder, out int floor) {
+        if (YVolumeManager.TryGetVolumePath(YVolumeManager.CurrentDrive, out string currentRoot)) {
+            remainder = value.TrimStart('/');
+            floor = CountSegments(currentRoot);
+            return currentRoot;
+        }
+        remainder = value.TrimStart('/');
+        floor = 0;
+        return "/";
     }
 
     private static string NormalizeUnbounded(string root, string relative, int floor) {
