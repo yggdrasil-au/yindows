@@ -4,7 +4,8 @@ bin/
 obj/
 
 .ignore/
-
+Build/
+ImageBackups/
 
 
 *.img
