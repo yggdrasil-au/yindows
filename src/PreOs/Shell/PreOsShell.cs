@@ -1,8 +1,10 @@
 using System;
+using System.Globalization;
 using yggdrasilKernel.Storage;
 using yggdrasilKernel.Vfs;
 using yggdrasilKernel;
 using System.Runtime.InteropServices;
+using yggdrasilKernel.OS;
 
 namespace yggdrasilKernel.PreOs.Shell;
 
@@ -14,6 +16,7 @@ public enum PreOsShellRequest {
 
 public sealed class PreOsShell {
     private bool _isDiskManagerMode;
+    private bool _isOsMenuMode;
 
     public PreOsShellRequest Run(bool kernelStopped) {
         DiskSpaceQuery.PumpCompleted();
@@ -24,6 +27,11 @@ public sealed class PreOsShell {
                 _isDiskManagerMode = DiskManagerCli.ExecuteCommand(diskManagerInput);
             }
             return PreOsShellRequest.None;
+        }
+
+        if (_isOsMenuMode) {
+            string osInput = ShellLineEditor.ReadLine("OS> ", osMenuMode: true);
+            return ExecuteOsCommand(osInput);
         }
 
         string input = ShellLineEditor.ReadLine($"{YDirectory.GetCurrentDirectory()}> ");
@@ -112,8 +120,9 @@ public sealed class PreOsShell {
             case "testwrite":
                 TestWrite();
                 break;
-            case "yindows":
-                return PreOsShellRequest.LaunchYindows;
+            case "os":
+                _isOsMenuMode = true;
+                break;
             default:
                 ShellOutput.WriteLine($"\"{command}\" is not a valid command. Type 'help' for commands.");
                 break;
@@ -137,8 +146,107 @@ public sealed class PreOsShell {
         ShellOutput.WriteLine("  space [drive:]         Scan and report free space in the background");
         ShellOutput.WriteLine("  diskmanager            Open the interactive disk manager");
         ShellOutput.WriteLine("  testwrite              Create sample files on C:");
+        ShellOutput.WriteLine("  os                     Open OS settings and actions");
         ShellOutput.WriteLine("  clear / cls            Clear the screen");
-        ShellOutput.WriteLine("  yindows                Launch the Yindows GUI");
+    }
+
+    private PreOsShellRequest ExecuteOsCommand(string input) {
+        if (string.IsNullOrWhiteSpace(input)) {
+            return PreOsShellRequest.None;
+        }
+
+        string trimmed = input.Trim();
+        int separator = trimmed.IndexOf(' ');
+        string command = (separator < 0 ? trimmed : trimmed.Substring(0, separator)).ToLowerInvariant();
+        string arguments = separator < 0 ? string.Empty : trimmed.Substring(separator + 1).Trim();
+
+        switch (command) {
+            case "help":
+            case "?":
+                PrintOsHelp();
+                break;
+            case "back":
+            case "exit":
+            case "quit":
+                _isOsMenuMode = false;
+                break;
+            case "yindows":
+                _isOsMenuMode = false;
+                return PreOsShellRequest.LaunchYindows;
+            case "timezone":
+                ExecuteTimeZoneCommand(arguments);
+                break;
+            default:
+                ShellOutput.WriteLine($"\"{command}\" is not an OS command. Type 'help' for OS commands.");
+                break;
+        }
+
+        return PreOsShellRequest.None;
+    }
+
+    private static void PrintOsHelp() {
+        ShellOutput.WriteLine("OS commands:");
+        ShellOutput.WriteLine("  help                         Show OS commands");
+        ShellOutput.WriteLine("  back                         Return to the main shell");
+        ShellOutput.WriteLine("  yindows                      Launch the Yindows GUI");
+        ShellOutput.WriteLine("  timezone list                List available timezones");
+        ShellOutput.WriteLine("  timezone current             Show the selected timezone");
+        ShellOutput.WriteLine("  timezone set <index or ID>   Select a timezone");
+    }
+
+    private static void ExecuteTimeZoneCommand(string arguments) {
+        if (string.IsNullOrWhiteSpace(arguments) || string.Equals(arguments, "list", StringComparison.OrdinalIgnoreCase)) {
+            PrintTimeZones();
+            return;
+        }
+
+        if (string.Equals(arguments, "current", StringComparison.OrdinalIgnoreCase)) {
+            ShellOutput.WriteLine($"Timezone: {TimeZones.CurrentId} ({TimeZones.CurrentDisplayName})");
+            return;
+        }
+
+        const string setPrefix = "set ";
+        if (!arguments.StartsWith(setPrefix, StringComparison.OrdinalIgnoreCase)) {
+            ShellOutput.WriteLine("Usage: timezone list | current | set <index or quoted Windows ID>");
+            return;
+        }
+
+        string selection = Unquote(arguments.Substring(setPrefix.Length).Trim());
+        if (selection.Length == 0) {
+            ShellOutput.WriteLine("Specify a timezone index or Windows timezone ID.");
+            return;
+        }
+
+        string selectedId;
+        if (int.TryParse(selection, NumberStyles.Integer, CultureInfo.InvariantCulture, out int zoneNumber)) {
+            if (zoneNumber < 1 || zoneNumber > TimeZones.Count) {
+                ShellOutput.WriteLine($"Timezone index must be between 1 and {TimeZones.Count}.");
+                return;
+            }
+            selectedId = TimeZones.GetAt(zoneNumber - 1).Id;
+        } else {
+            selectedId = selection;
+        }
+
+        if (!TimeZones.TrySetCurrent(selectedId)) {
+            ShellOutput.WriteLine($"Unknown Windows timezone ID: {selectedId}");
+            return;
+        }
+
+        if (TimeZoneSettings.TrySaveCurrent(out string error)) {
+            ShellOutput.WriteLine($"Timezone set to {TimeZones.CurrentId} and saved.");
+        } else {
+            ShellOutput.WriteLine($"Timezone set to {TimeZones.CurrentId} for this boot; it could not be saved: {error}");
+        }
+    }
+
+    private static void PrintTimeZones() {
+        ShellOutput.WriteLine($"Available timezones ({TimeZones.Count}):");
+        for (int index = 0; index < TimeZones.Count; index++) {
+            TimeZoneDefinition timeZone = TimeZones.GetAt(index);
+            ShellOutput.WriteLine($"  {index + 1,3}. {timeZone.Id} - {timeZone.DisplayName}");
+        }
+        ShellOutput.WriteLine($"Current: {TimeZones.CurrentId}");
     }
 
     private static bool IsDirectDriveSwitch(string path) {

@@ -16,14 +16,20 @@ public static class ShellLineEditor {
     private static readonly string[] ShellCommands = {
         "help", "clear", "cls", "halt", "shutdown", "pwd", "drives", "space", "diskmanager", "diskmgmt",
         "diskpart", "ls", "dir", "cd", "cat", "type", "tree", "mkdir", "rm", "del", "rmdir",
-        "write", "testwrite", "yindows",
+        "write", "testwrite", "os",
+    };
+    private static readonly string[] OsCommands = {
+        "help", "?", "back", "exit", "quit", "yindows", "timezone",
+    };
+    private static readonly string[] OsTimeZoneCommands = {
+        "list", "current", "set",
     };
     private static readonly string[] DiskManagerCommands = {
         "help", "home", "exit", "back", "quit", "clear", "cls", "list", "disks", "partitions",
         "parts", "volumes", "drives", "space", "assign", "format", "init", "reset", "wipe", "erase", "rescan", "info",
     };
 
-    public static string ReadLine(string prompt, bool diskManagerMode = false) {
+    public static string ReadLine(string prompt, bool diskManagerMode = false, bool osMenuMode = false) {
         StringBuilder buffer = new();
         int cursor = 0;
         int historyIndex = _history.Count;
@@ -71,7 +77,7 @@ public static class ShellLineEditor {
                         lastCompletedLine = buffer.ToString();
                     } else {
                         cycleBaseLine = buffer.ToString();
-                        if (TryGetCompletions(cycleBaseLine, cursor, diskManagerMode, out cycleStart, out cycleEnd, out cycleItems)
+                        if (TryGetCompletions(cycleBaseLine, cursor, diskManagerMode, osMenuMode, out cycleStart, out cycleEnd, out cycleItems)
                             && cycleItems.Count > 0) {
                             cycleIndex = 0;
                             ApplyCompletion(buffer, ref cursor, cycleBaseLine, cycleStart, cycleEnd, cycleItems[cycleIndex]);
@@ -185,13 +191,22 @@ public static class ShellLineEditor {
         }
     }
 
-    private static bool TryGetCompletions(string line, int cursor, bool diskManagerMode, out int tokenStart, out int tokenEnd, out List<string> completions) {
+    private static bool TryGetCompletions(string line, int cursor, bool diskManagerMode, bool osMenuMode, out int tokenStart, out int tokenEnd, out List<string> completions) {
         FindTokenRange(line, cursor, out tokenStart, out tokenEnd);
         string token = line.Substring(tokenStart, tokenEnd - tokenStart);
         completions = new List<string>();
 
+        if (osMenuMode && string.Equals(line.Substring(0, tokenStart).Trim(), "timezone", StringComparison.OrdinalIgnoreCase)) {
+            for (int index = 0; index < OsTimeZoneCommands.Length; index++) {
+                if (OsTimeZoneCommands[index].StartsWith(token, StringComparison.OrdinalIgnoreCase)) {
+                    completions.Add(OsTimeZoneCommands[index] + " ");
+                }
+            }
+            return completions.Count > 0;
+        }
+
         if (line.Substring(0, tokenStart).Trim().Length == 0) {
-            string[] commands = diskManagerMode ? DiskManagerCommands : ShellCommands;
+            string[] commands = diskManagerMode ? DiskManagerCommands : osMenuMode ? OsCommands : ShellCommands;
             for (int index = 0; index < commands.Length; index++) {
                 if (commands[index].StartsWith(token, StringComparison.OrdinalIgnoreCase)) {
                     completions.Add(commands[index] + " ");
@@ -205,6 +220,10 @@ public static class ShellLineEditor {
                 }
             }
             return completions.Count > 0;
+        }
+
+        if (osMenuMode) {
+            return false;
         }
 
         char quote = token.Length > 0 && (token[0] == '"' || token[0] == '\'') ? token[0] : '\0';

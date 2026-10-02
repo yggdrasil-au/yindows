@@ -1,9 +1,11 @@
+using System;
 using System.Drawing;
 using Cosmos.Kernel.System.Graphics;
 using Cosmos.Kernel.System.Graphics.Fonts;
 using Cosmos.Kernel.System.Mouse;
 
 using yggdrasilKernel.HAL;
+using yggdrasilKernel.OS;
 
 namespace yggdrasilKernel.PreOs.Desktop;
 
@@ -11,8 +13,21 @@ public static class WindowManager {
     private static Canvas? _canvas;
     private static bool _isLoading = true;
     private static int _loadingTicks;
-    private static int _lastMinute = -1;
-    private static string _cachedTime = "00:00";
+    private const int CompactClockScale = 2;
+    private const int CompactClockGlyphWidth = 5;
+    private const int CompactClockSpacing = 1;
+    private static readonly string[][] CompactClockDigits = {
+        new[] { "01110", "10001", "10011", "10101", "11001", "10001", "01110" },
+        new[] { "00100", "01100", "00100", "00100", "00100", "00100", "01110" },
+        new[] { "01110", "10001", "00001", "00010", "00100", "01000", "11111" },
+        new[] { "11110", "00001", "00001", "01110", "00001", "00001", "11110" },
+        new[] { "00010", "00110", "01010", "10010", "11111", "00010", "00010" },
+        new[] { "11111", "10000", "10000", "11110", "00001", "00001", "11110" },
+        new[] { "01110", "10000", "10000", "11110", "10001", "10001", "01110" },
+        new[] { "11111", "00001", "00010", "00100", "01000", "01000", "01000" },
+        new[] { "01110", "10001", "10001", "01110", "10001", "10001", "01110" },
+        new[] { "01110", "10001", "10001", "01111", "00001", "00001", "01110" },
+    };
 
     private static readonly Color DesktopColor = Color.FromArgb(0, 90, 158);
     private static readonly Color TaskbarColor = Color.FromArgb(23, 23, 23);
@@ -114,13 +129,16 @@ public static class WindowManager {
         }
 
         // 4. System Tray (Current Time)
-        string timeStr = GetCurrentTime();
-
-        // Dynamically calculate the text width so it perfectly aligns to the right edge
-        int timeWidth = timeStr.Length * PCScreenFont.DefaultFont.Width;
+        DateTime localTime = GetCurrentTime();
+        string timeStr = $"{localTime.Hour:D2}:{localTime.Minute:D2}:{localTime.Second:D2}";
+        string dateStr = $"{localTime.Year:D4}-{localTime.Month:D2}-{localTime.Day:D2}";
+        PCScreenFont font = PCScreenFont.DefaultFont;
+        int timeWidth = MeasureCompactClock(timeStr);
+        int dateWidth = font.MeasureString(dateStr);
         int rightMargin = 15; // Padding from the edge of the screen
 
-        canvas.DrawString(timeStr, PCScreenFont.DefaultFont, Color.White, screenWidth - timeWidth - rightMargin, taskbarY + 12);
+        DrawCompactClock(canvas, timeStr, Color.White, screenWidth - timeWidth - rightMargin, taskbarY + 1);
+        canvas.DrawString(dateStr, font, Color.White, screenWidth - dateWidth - rightMargin, taskbarY + 20);
     }
 
     private static void DrawStartButtonLogo(Canvas canvas, int buttonWidth, int buttonY, int buttonHeight) {
@@ -150,7 +168,42 @@ public static class WindowManager {
         }
     }
 
-    private static string GetCurrentTime() {
-        return HAL.HardwareClock.GetFormattedTime();
+    private static DateTime GetCurrentTime() {
+        return TimeZones.ConvertUtcToLocal(HardwareClock.GetCurrentTime());
+    }
+
+    private static int MeasureCompactClock(string value) {
+        return (value.Length * (CompactClockGlyphWidth + CompactClockSpacing) - CompactClockSpacing) * CompactClockScale;
+    }
+
+    private static void DrawCompactClock(Canvas canvas, string value, Color color, int x, int y) {
+        int characterAdvance = (CompactClockGlyphWidth + CompactClockSpacing) * CompactClockScale;
+        for (int characterIndex = 0; characterIndex < value.Length; characterIndex++) {
+            char character = value[characterIndex];
+            int characterX = x + (characterIndex * characterAdvance);
+            if (character == ':') {
+                canvas.DrawFilledRectangle(color, characterX + (2 * CompactClockScale), y + (1 * CompactClockScale), CompactClockScale, CompactClockScale);
+                canvas.DrawFilledRectangle(color, characterX + (2 * CompactClockScale), y + (5 * CompactClockScale), CompactClockScale, CompactClockScale);
+                continue;
+            }
+
+            if (character < '0' || character > '9') {
+                continue;
+            }
+
+            string[] digit = CompactClockDigits[character - '0'];
+            for (int row = 0; row < digit.Length; row++) {
+                for (int column = 0; column < CompactClockGlyphWidth; column++) {
+                    if (digit[row][column] == '1') {
+                        canvas.DrawFilledRectangle(
+                            color,
+                            characterX + (column * CompactClockScale),
+                            y + (row * CompactClockScale),
+                            CompactClockScale,
+                            CompactClockScale);
+                    }
+                }
+            }
+        }
     }
 }

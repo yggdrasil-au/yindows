@@ -6,6 +6,7 @@ using yggdrasilKernel.PreOs.Desktop;
 using yggdrasilKernel.Storage;
 using yggdrasilKernel.Vfs;
 using yggdrasilKernel.PreOs.Shell;
+using yggdrasilKernel.OS;
 
 namespace yggdrasilKernel;
 
@@ -43,6 +44,10 @@ public class Kernel : CKSys.Kernel {
     }
 
     protected override void BeforeRun() {
+        if (!TimeZoneSettings.TryLoad(out string timeZoneError)) {
+            ShellOutput.WriteLine($"Timezone setting was not loaded: {timeZoneError}");
+        }
+
         ShellOutput.WriteLine("Cosmos booted successfully!");
         ShellOutput.WriteLine("Type 'help' for commands, or 'diskmanager' to manage disks.");
     }
