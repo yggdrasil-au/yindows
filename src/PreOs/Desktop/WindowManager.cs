@@ -122,6 +122,11 @@ public static class WindowManager {
     }
 
     private static string GetCurrentTime() {
+        // use hardware clock from HAL
+        return HardwareClock.GetFormattedTime();
+        // The following code is now obsolete because we are using the hardware clock
+        // the value this returned was incorrect by a few hours
+        /*
         System.DateTime now = System.DateTime.Now;
         if (now.Minute != _lastMinute) {
             _lastMinute = now.Minute;
@@ -129,5 +134,6 @@ public static class WindowManager {
         }
 
         return _cachedTime;
+        */
     }
 }

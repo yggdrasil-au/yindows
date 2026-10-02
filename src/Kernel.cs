@@ -47,6 +47,9 @@ public class Kernel : CKSys.Kernel {
         ShellOutput.WriteLine("Type 'help' for commands, or 'diskmanager' to manage disks.");
     }
 
+    /// <summary>
+    /// Runs the main loop of the kernel, handling different kernel modes.
+    /// </summary>
     protected override void Run() {
         switch (_mode) {
             case KernelMode.PreOsShell:

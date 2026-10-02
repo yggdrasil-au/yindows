@@ -5,8 +5,13 @@
         <OutputType>Exe</OutputType>
         <TargetFramework>net10.0</TargetFramework>
         <ImplicitUsings>disable</ImplicitUsings>
+        <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     </PropertyGroup>
 
+    <!-- compile only the src folder .cs files -->
+    <ItemGroup>
+        <Compile Include="src\**\*.cs" />
+    </ItemGroup>
 
     <!-- Core kernel and System packages -->
     <ItemGroup>
